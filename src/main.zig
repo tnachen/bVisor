@@ -92,13 +92,13 @@ fn child_process(socket: FD) !void {
     };
 
     // Install program using seccomp
-    const notify_fd: FD = try resultToFd(
+    const notify_fd: FD = try Result(FD).from(
         linux.seccomp(
             linux.SECCOMP.SET_MODE_FILTER,
             linux.SECCOMP.FILTER_FLAG.NEW_LISTENER,
             @ptrCast(&prog),
         ),
-    );
+    ).unwrap();
 
     // Verify prediction was correct
     if (notify_fd != next_fd) {
@@ -117,19 +117,28 @@ fn child_process(socket: FD) !void {
     std.debug.print("Child done!\n", .{});
 }
 
-/// Convert a linux syscall result (usize) to an error union with proper errno handling
-fn resultToFd(result: usize) posix.UnexpectedError!FD {
-    return switch (linux.errno(result)) {
-        .SUCCESS => @intCast(result),
-        else => |err| posix.unexpectedErrno(err),
-    };
-}
+fn Result(comptime T: type) type {
+    return union(enum) {
+        Ok: T,
+        Error: linux.E,
 
-/// Same but returns usize for non-fd results
-fn resultOk(result: usize) posix.UnexpectedError!usize {
-    return switch (linux.errno(result)) {
-        .SUCCESS => result,
-        else => |err| posix.unexpectedErrno(err),
+        const Self = @This();
+
+        fn from(result: usize) Self {
+            return switch (linux.errno(result)) {
+                .SUCCESS => Self{ .Ok = @intCast(result) },
+                else => Self{ .Error = linux.errno(result) },
+            };
+        }
+
+        /// Returns inner value, or throws a general error
+        /// If specific error types are needed, prefer to switch on Result then switch on Error branch
+        fn unwrap(self: Self) !T {
+            return switch (self) {
+                .Ok => |value| value,
+                .Error => |_| error.SyscallFailed, // Some general error
+            };
+        }
     };
 }
 
@@ -157,9 +166,9 @@ fn supervisor_process(socket: FD, child_pid: linux.pid_t) !void {
     const child_notify_fd: FD = std.mem.readInt(i32, &child_notify_fd_bytes, .little);
 
     // Use child PID to look up its FD table
-    const child_fd_table: FD = try resultToFd(
+    const child_fd_table: FD = try Result(FD).from(
         linux.pidfd_open(child_pid, 0),
-    );
+    ).unwrap();
 
     // Since notify FD was sent eagerly, poll child's FD table until FD is visible
     // Otherwise we'd have race condition
@@ -167,18 +176,19 @@ fn supervisor_process(socket: FD, child_pid: linux.pid_t) !void {
     var attempts: u32 = 0;
     while (attempts < 100) : (attempts += 1) {
         const result = linux.pidfd_getfd(child_fd_table, child_notify_fd, 0);
-        switch (linux.errno(result)) {
-            .SUCCESS => {
-                notify_fd = @intCast(result);
-                std.debug.print("Got notify fd: {} (attempt {})\n", .{ notify_fd, attempts + 1 });
+        switch (Result(FD).from(result)) {
+            .Ok => |value| {
+                notify_fd = value;
                 break;
             },
-            .BADF => {
-                // FD doesn't exist yet in child - retry
-                try io.sleep(std.Io.Duration.fromMilliseconds(10), .awake);
-                continue;
+            .Error => |err| switch (err) {
+                .BADF => {
+                    // FD doesn't exist yet in child - retry
+                    try io.sleep(std.Io.Duration.fromMilliseconds(10), .awake);
+                    continue;
+                },
+                else => |_| return posix.unexpectedErrno(err),
             },
-            else => |err| return posix.unexpectedErrno(err),
         }
     } else {
         return error.PidfdGetfdFailed;
@@ -202,14 +212,16 @@ fn handle_notifications(notify_fd: FD) !void {
     }) {
         // Receive notification
         const recv_result = linux.ioctl(notify_fd, linux.SECCOMP.IOCTL_NOTIF.RECV, @intFromPtr(&req));
-        switch (linux.errno(recv_result)) {
-            .SUCCESS => {},
-            .NOENT => {
-                // Thrown when child exits
-                std.debug.print("Child exited, stopping notification handler\n", .{});
-                break;
+        switch (Result(usize).from(recv_result)) {
+            .Ok => {},
+            .Error => |err| switch (err) {
+                .NOENT => {
+                    // Thrown when child exits
+                    std.debug.print("Child exited, stopping notification handler\n", .{});
+                    break;
+                },
+                else => |_| return posix.unexpectedErrno(err),
             },
-            else => |err| return posix.unexpectedErrno(err),
         }
 
         std.debug.print("Intercepted syscall {} from pid {}, id={}\n", .{ req.data.nr, req.pid, req.id });
@@ -220,9 +232,9 @@ fn handle_notifications(notify_fd: FD) !void {
         resp.val = 0;
         resp.flags = linux.SECCOMP.USER_NOTIF_FLAG_CONTINUE;
 
-        _ = try resultOk(
+        _ = try Result(usize).from(
             linux.ioctl(notify_fd, linux.SECCOMP.IOCTL_NOTIF.SEND, @intFromPtr(&resp)),
-        );
+        ).unwrap();
 
         std.debug.print("Pass through syscall {}\n", .{req.data.nr});
     }
