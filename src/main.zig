@@ -194,12 +194,16 @@ fn supervisor_process(socket: FD, child_pid: linux.pid_t) !void {
         return error.PidfdGetfdFailed;
     }
 
+    const mem_bridge = MemoryBridge.init(child_pid);
+
     // Now we have the notify fd! Start handling notifications
-    try handle_notifications(notify_fd);
+    try handle_notifications(notify_fd, mem_bridge);
 }
 
-fn handle_notifications(notify_fd: FD) !void {
+fn handle_notifications(notify_fd: FD, mem_bridge: MemoryBridge) !void {
     std.debug.print("Starting notification handler on fd {}\n", .{notify_fd});
+
+    const logger = Logger.init("supervisor");
 
     // Allocate zeroed structures
     var req: linux.SECCOMP.notif = std.mem.zeroes(linux.SECCOMP.notif);
@@ -224,7 +228,22 @@ fn handle_notifications(notify_fd: FD) !void {
             },
         }
 
-        std.debug.print("Intercepted syscall {} from pid {}, id={}\n", .{ req.data.nr, req.pid, req.id });
+        const sys_call = try SysCall.parse(mem_bridge, req);
+        switch (sys_call) {
+            .passthrough => |sys_code| {
+                logger.log("Syscall: passthrough: {s}", .{@tagName(sys_code)});
+            },
+            .clock_nanosleep => |inner| {
+                logger.log("Syscall: clock_nanosleep", .{});
+                logger.log("Original nanos: {d}", .{inner.request.nsec});
+
+                // experiment: fuck around with sleep by overwriting requested duration in child
+                var new_req = inner.request;
+                new_req.nsec = @divFloor(new_req.nsec, 5); // 5x faster
+                logger.log("TURBOMODE nanos: {d}", .{new_req.nsec});
+                try mem_bridge.write(linux.timespec, new_req, req.data.arg2);
+            },
+        }
 
         // Allow the syscall to proceed (passthrough mode)
         resp.id = req.id;
@@ -235,7 +254,115 @@ fn handle_notifications(notify_fd: FD) !void {
         _ = try Result(usize).from(
             linux.ioctl(notify_fd, linux.SECCOMP.IOCTL_NOTIF.SEND, @intFromPtr(&resp)),
         ).unwrap();
-
-        std.debug.print("Pass through syscall {}\n", .{req.data.nr});
     }
 }
+
+const SysCall = union(enum) {
+    // Unsupported syscalls passthrough
+    passthrough: linux.SYS,
+
+    // Supported:
+    clock_nanosleep: struct {
+        clock_id: linux.clockid_t,
+        flags: u64,
+        request: linux.timespec,
+        remain: linux.timespec,
+    },
+
+    const Self = @This();
+
+    fn parse(mem_bridge: MemoryBridge, req: linux.SECCOMP.notif) !Self {
+        const sys_code: linux.SYS = @enumFromInt(req.data.nr);
+        switch (sys_code) {
+            else => {
+                return Self{ .passthrough = sys_code };
+            },
+            .clock_nanosleep => {
+                return Self{
+                    .clock_nanosleep = .{
+                        .clock_id = @enumFromInt(req.data.arg0),
+                        .flags = req.data.arg1,
+                        .request = try mem_bridge.read(linux.timespec, req.data.arg2),
+                        .remain = try mem_bridge.read(linux.timespec, req.data.arg3),
+                    },
+                };
+            },
+        }
+    }
+};
+
+/// MemoryBridge allows cross-process reading and writing of arbitrary data from a child process
+/// This is needed for cases where syscalls from a child contain pointers
+/// pointing to its own process-local address space
+const MemoryBridge = struct {
+    child_pid: linux.pid_t,
+
+    fn init(child_pid: linux.pid_t) @This() {
+        return .{ .child_pid = child_pid };
+    }
+
+    /// Read an object of type T from child_addr in child's address space
+    /// This creates a copy in the local process
+    /// Remember any nested pointers returned are still in child's address space
+    fn read(self: @This(), T: type, child_addr: u64) !T {
+        const child_iovec: [1]posix.iovec_const = .{.{
+            .base = @ptrFromInt(child_addr),
+            .len = @sizeOf(T),
+        }};
+
+        var local_T: T = undefined;
+        const local_iovec: [1]posix.iovec = .{.{
+            .base = @ptrCast(&local_T),
+            .len = @sizeOf(T),
+        }};
+
+        _ = try Result(usize).from(
+            // https://man7.org/linux/man-pages/man2/process_vm_readv.2.html
+            linux.process_vm_readv(
+                self.child_pid,
+                &local_iovec,
+                &child_iovec,
+                0,
+            ),
+        ).unwrap();
+        return local_T;
+    }
+
+    /// Write an object of type T into child's address space at child_addr
+    /// Misuse could seriously corrupt child process
+    fn write(self: @This(), T: type, val: T, child_addr: u64) !void {
+        const local_iovec: [1]posix.iovec_const = .{.{
+            .base = @ptrCast(&val),
+            .len = @sizeOf(T),
+        }};
+
+        const child_iovec: [1]posix.iovec_const = .{.{
+            .base = @ptrFromInt(child_addr),
+            .len = @sizeOf(T),
+        }};
+
+        _ = try Result(usize).from(
+            // https://man7.org/linux/man-pages/man2/process_vm_writev.2.html
+            linux.process_vm_writev(
+                self.child_pid,
+                &local_iovec,
+                &child_iovec,
+                0,
+            ),
+        ).unwrap();
+    }
+};
+
+const Logger = struct {
+    name: []const u8,
+
+    fn init(name: []const u8) @This() {
+        return .{ .name = name };
+    }
+
+    fn log(self: @This(), comptime format: []const u8, args: anytype) void {
+        var buf: [1024]u8 = undefined;
+        const fmtlog = std.fmt.bufPrint(&buf, format, args) catch unreachable;
+        std.debug.print("\x1b[95m[{s}]\t{s}\x1b[0m\n", .{ self.name, fmtlog });
+    }
+};
