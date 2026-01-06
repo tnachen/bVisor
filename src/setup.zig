@@ -3,10 +3,10 @@ const posix = std.posix;
 const linux = std.os.linux;
 const types = @import("types.zig");
 const FD = types.FD;
-const Result = types.Result;
+const Result = types.LinuxResult;
 const MemoryBridge = types.MemoryBridge;
 const Logger = types.Logger;
-const handle_notifications = @import("supervisor.zig").handle_notifications;
+const Supervisor = @import("supervisor.zig");
 
 pub fn run(runnable: *const fn (io: std.Io) void) !void {
     // Create socket pair for child and supervisor
@@ -170,8 +170,6 @@ fn supervisor_process(socket: FD, child_pid: linux.pid_t) !void {
         return error.PidfdGetfdFailed;
     }
 
-    const mem_bridge = MemoryBridge.init(child_pid);
-
-    // Now we have the notify fd! Start handling notifications
-    try handle_notifications(notify_fd, mem_bridge);
+    const supervisor = Supervisor.init(notify_fd, child_pid);
+    try supervisor.run();
 }

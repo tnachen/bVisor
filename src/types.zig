@@ -5,7 +5,7 @@ const posix = std.posix;
 // File Descriptor
 pub const FD = i32;
 
-pub fn Result(comptime T: type) type {
+pub fn LinuxResult(comptime T: type) type {
     return union(enum) {
         Ok: T,
         Error: linux.E,
@@ -55,7 +55,7 @@ pub const MemoryBridge = struct {
             .len = @sizeOf(T),
         }};
 
-        _ = try Result(usize).from(
+        _ = try LinuxResult(usize).from(
             // https://man7.org/linux/man-pages/man2/process_vm_readv.2.html
             linux.process_vm_readv(
                 self.child_pid,
@@ -80,7 +80,7 @@ pub const MemoryBridge = struct {
             .len = @sizeOf(T),
         }};
 
-        _ = try Result(usize).from(
+        _ = try LinuxResult(usize).from(
             // https://man7.org/linux/man-pages/man2/process_vm_writev.2.html
             linux.process_vm_writev(
                 self.child_pid,
