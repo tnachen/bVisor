@@ -1,9 +1,10 @@
 const std = @import("std");
 const linux = std.os.linux;
 const types = @import("../types.zig");
-const MemoryBridge = types.MemoryBridge;
+const MemoryBridge = @import("../memory_bridge.zig").MemoryBridge;
 const Logger = types.Logger;
 const Result = @import("../syscall.zig").Syscall.Result;
+const Supervisor = @import("../Supervisor.zig");
 
 clock_id: linux.clockid_t,
 flags: linux.TIMER,
@@ -23,7 +24,12 @@ pub fn parse(mem_bridge: MemoryBridge, notif: linux.SECCOMP.notif) !Self {
     };
 }
 
-pub fn handle(self: Self, mem_bridge: MemoryBridge, logger: Logger) !Result {
+// Just a proof of concept, since it's a very visible and easy to implement syscall to emulate
+// We'd normally just want to passthrough
+pub fn handle(self: Self, supervisor: *Supervisor) !Result {
+    const logger = supervisor.logger;
+    const mem_bridge = supervisor.mem_bridge;
+
     logger.log("Emulating clock_nanosleep: clock={s} sec={d}.{d}", .{
         @tagName(self.clock_id),
         self.request.sec,
@@ -36,7 +42,7 @@ pub fn handle(self: Self, mem_bridge: MemoryBridge, logger: Logger) !Result {
 
     if (err_code == .SUCCESS) {
         logger.log("clock_nanosleep completed successfully", .{});
-        return Result.success(0);
+        return .{ .handled = Result.Handled.success(0) };
     }
 
     if (err_code == .INTR and self.remain_ptr != 0) {
@@ -46,5 +52,5 @@ pub fn handle(self: Self, mem_bridge: MemoryBridge, logger: Logger) !Result {
         };
     }
 
-    return Result.err(err_code);
+    return .{ .handled = Result.Handled.err(err_code) };
 }
