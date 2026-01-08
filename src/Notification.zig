@@ -1,10 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
 const types = @import("types.zig");
-const MemoryBridge = @import("memory_bridge.zig").MemoryBridge;
+const MemoryBridge = types.MemoryBridge;
 const Logger = types.Logger;
 const Syscall = @import("syscall.zig").Syscall;
-const Supervisor = @import("Supervisor.zig");
 
 /// Notification is a wrapper around linux.SECCOMP.notif
 const Self = @This();
@@ -16,7 +15,7 @@ action: union(enum) {
 },
 
 /// Parse a linux.SECCOMP.notif into a Notification
-pub fn fromNotif(mem_bridge: MemoryBridge, notif: linux.SECCOMP.notif) !Self {
+pub fn from_notif(mem_bridge: MemoryBridge, notif: linux.SECCOMP.notif) !Self {
     const supported = try Syscall.parse(mem_bridge, notif);
 
     if (supported) |syscall| {
@@ -38,14 +37,14 @@ pub fn fromNotif(mem_bridge: MemoryBridge, notif: linux.SECCOMP.notif) !Self {
 }
 
 /// Invoke the handler, or perform passthrough
-pub fn handle(self: Self, supervisor: *Supervisor) !Response {
+pub fn handle(self: Self, mem_bridge: MemoryBridge, logger: Logger) !Response {
     switch (self.action) {
         .passthrough => |sys_code| {
-            supervisor.logger.log("Syscall: passthrough: {s}", .{@tagName(sys_code)});
+            logger.log("Syscall: passthrough: {s}", .{@tagName(sys_code)});
             return Response.Passthrough(self.id);
         },
         .emulate => |syscall| {
-            const result = try syscall.handle(supervisor);
+            const result = try syscall.handle(mem_bridge, logger);
             return Response.Emulated(self.id, result);
         },
     }
@@ -73,7 +72,7 @@ pub const Response = struct {
         };
     }
 
-    pub fn toNotifResp(self: @This()) linux.SECCOMP.notif_resp {
+    pub fn to_notif_resp(self: @This()) linux.SECCOMP.notif_resp {
         return switch (self.result) {
             .passthrough => .{
                 .id = self.id,
@@ -81,21 +80,11 @@ pub const Response = struct {
                 .val = 0,
                 .@"error" = 0,
             },
-            .emulated => |result| switch (result) {
-                // Handler decided to passthrough at runtime
-                .passthrough => .{
-                    .id = self.id,
-                    .flags = linux.SECCOMP.USER_NOTIF_FLAG_CONTINUE,
-                    .val = 0,
-                    .@"error" = 0,
-                },
-                // Handler emulated the syscall
-                .handled => |h| .{
-                    .id = self.id,
-                    .flags = 0,
-                    .val = h.val,
-                    .@"error" = h.errno,
-                },
+            .emulated => |emulated| .{
+                .id = self.id,
+                .flags = 0,
+                .val = emulated.val,
+                .@"error" = emulated.errno,
             },
         };
     }
