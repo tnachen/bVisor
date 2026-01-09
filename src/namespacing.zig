@@ -14,6 +14,7 @@ const KernelPID = linux.pid_t;
 
 const KernelToVirtualProcMap = std.AutoHashMapUnmanaged(KernelPID, *VirtualProc);
 const VirtualProcSet = std.AutoHashMapUnmanaged(*VirtualProc, void);
+const VirtualProcList = std.ArrayList(*VirtualProc);
 
 const VirtualProc = struct {
     const Self = @This();
@@ -59,30 +60,38 @@ const VirtualProc = struct {
         _ = self.children.remove(child);
     }
 
-    fn traverse_descendants(self: *Self, accumulator: *std.ArrayList(*VirtualProc), allocator: Allocator) !void {
+    /// Collect a flat list of this process and all descendents
+    /// Returned ArrayList must be freed by caller
+    fn collect_tree_owned(self: *Self, allocator: Allocator) !VirtualProcList {
+        var accumulator = try VirtualProcList.initCapacity(allocator, 16);
+        try accumulator.append(allocator, self); // include self
+        try self._collect_tree_recursive(&accumulator, allocator);
+        return accumulator;
+    }
+
+    fn _collect_tree_recursive(self: *Self, accumulator: *VirtualProcList, allocator: Allocator) !void {
+        try accumulator.append(allocator, self);
         var iter = self.children.iterator();
         while (iter.next()) |child_entry| {
             const child: *VirtualProc = child_entry.key_ptr.*;
-            try child.traverse_descendants(accumulator, allocator);
-            try accumulator.append(allocator, child);
+            try child._collect_tree_recursive(accumulator, allocator);
         }
     }
 
     pub fn next_pid(self: *Self, allocator: Allocator) !VirtualPID {
-        var desc = try std.ArrayList(*VirtualProc).initCapacity(allocator, 16);
-        defer desc.deinit(allocator);
-        try self.traverse_descendants(&desc, allocator);
+        var procs = try self.collect_tree_owned(allocator);
+        defer procs.deinit(allocator);
 
-        var pid = self.pid + 1;
+        var candidate_pid = self.pid + 1;
         // increment until no collision with existing
         // TODO: can be optimized significantly
-        while (true) : (pid += 1) {
-            for (desc.items) |proc| {
-                if (proc.pid == pid) {
-                    continue;
+        outer: while (true) : (candidate_pid += 1) {
+            for (procs.items) |proc| {
+                if (proc.pid == candidate_pid) {
+                    continue :outer;
                 }
             }
-            return pid;
+            return candidate_pid;
         }
     }
 };
@@ -144,15 +153,16 @@ const FlatMap = struct {
         const parent = target_proc.parent;
 
         // collect all descendents
-        var to_delete = try std.ArrayList(*VirtualProc).initCapacity(allocator, 16);
-        defer to_delete.deinit(allocator);
-        try target_proc.traverse_descendants(&to_delete, allocator);
+        var procs_to_delete = try target_proc.collect_tree_owned(allocator);
+        defer procs_to_delete.deinit(allocator);
 
-        // include target
-        try to_delete.append(allocator, target_proc);
+        // remove target from parent's children
+        if (parent) |parent_proc| {
+            parent_proc.remove_child_link(target_proc);
+        }
 
         // remove mappings from procs
-        for (to_delete.items) |child| {
+        for (procs_to_delete.items) |child| {
             var iter = self.procs.iterator();
             while (iter.next()) |entry| {
                 if (entry.value_ptr.* == child) {
@@ -161,13 +171,8 @@ const FlatMap = struct {
             }
         }
 
-        // remove target from parent's children
-        if (parent) |parent_proc| {
-            parent_proc.remove_child_link(target_proc);
-        }
-
-        // mass-deinit
-        for (to_delete.items) |proc| {
+        // mass-deinit items themseles
+        for (procs_to_delete.items) |proc| {
             proc.deinit(allocator);
         }
     }
