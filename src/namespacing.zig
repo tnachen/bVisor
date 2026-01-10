@@ -1,15 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const assert = std.debug.assert;
 
-const FD = union { kernel: KernelFD, virtual: VirtualFD };
-const VirtualFD = linux.fd_t;
-const KernelFD = linux.fd_t;
-
-const PID = union { kernel: KernelPID, virtual: VirtualPID };
 const VirtualPID = linux.pid_t;
 const KernelPID = linux.pid_t;
 
@@ -33,13 +25,14 @@ const Namespace = struct {
         allocator.destroy(self);
     }
 
-    pub fn next_vpid(self: *Namespace) VirtualPID {
+    pub fn next_vpid(self: *Self) VirtualPID {
         self.vpid_counter += 1;
         return self.vpid_counter;
     }
 };
 
 const Proc = struct {
+    pid: KernelPID,
     namespace: *Namespace,
     vpid: VirtualPID,
     parent: ?*Proc,
@@ -47,12 +40,13 @@ const Proc = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, namespace: ?*Namespace, parent: ?*Proc) !*Self {
+    fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, parent: ?*Proc) !*Self {
         if (namespace) |ns| {
             // proc inherits parent namespace
             const vpid = ns.next_vpid();
             const self = try allocator.create(Self);
             self.* = .{
+                .pid = pid,
                 .namespace = ns,
                 .vpid = vpid,
                 .parent = parent,
@@ -66,6 +60,7 @@ const Proc = struct {
         const vpid = ns.next_vpid();
         const self = try allocator.create(Self);
         self.* = .{
+            .pid = pid,
             .namespace = ns,
             .vpid = vpid,
             .parent = parent,
@@ -90,23 +85,18 @@ const Proc = struct {
     }
 
     fn get_namespace_root(self: *Self) *Proc {
-        if (self.is_namespace_root()) return self;
-
         var current = self;
-        while (current.parent) |parent| {
-            if (parent.is_namespace_root()) return parent;
-            current = parent;
+        while (current.parent) |p| {
+            if (current.namespace != p.namespace) break;
+            current = p;
         }
-
-        // root should always be hit in parent if self is not already root
-        // so this should never happen
-        std.debug.panic("Proc.get_namespace_root: root not found", .{});
+        return current;
     }
 
-    fn init_child(self: *Self, allocator: Allocator, namespace: ?*Namespace) !*Self {
+    fn init_child(self: *Self, allocator: Allocator, pid: KernelPID, namespace: ?*Namespace) !*Self {
         // TODO: support different clone flags to determine what gets copied over from parent
 
-        const child = try Proc.init(allocator, namespace, self);
+        const child = try Proc.init(allocator, pid, namespace, self);
         errdefer child.deinit(allocator);
 
         try self.children.put(allocator, child, {});
@@ -114,19 +104,20 @@ const Proc = struct {
         return child;
     }
 
-    pub fn deinit_child(self: *Self, child: *Self, allocator: Allocator) void {
+    fn deinit_child(self: *Self, child: *Self, allocator: Allocator) void {
         self.remove_child_link(child);
         child.deinit(allocator);
     }
 
-    pub fn remove_child_link(self: *Self, child: *Self) void {
+    fn remove_child_link(self: *Self, child: *Self) void {
         _ = self.children.remove(child);
     }
 
-    /// Get a sorted list of all PIDs in this process's namespace
-    fn get_pids_owned(self: *Self, allocator: Allocator) ![]VirtualPID {
+    /// Get a sorted list of all virtual PIDs visible in this process's namespace.
+    /// Does not include processes in nested child namespaces.
+    fn get_vpids_owned(self: *Self, allocator: Allocator) ![]VirtualPID {
         const root = self.get_namespace_root();
-        const procs = try root.collect_subtree_owned(allocator);
+        const procs = try root.collect_namespace_procs_owned(allocator);
         defer allocator.free(procs);
 
         var vpids = try std.ArrayList(VirtualPID).initCapacity(allocator, procs.len);
@@ -137,8 +128,28 @@ const Proc = struct {
         return vpids.toOwnedSlice(allocator);
     }
 
-    /// Collect a flat list of this process and all descendents
-    /// Returned ArrayList must be freed by caller
+    /// Collect all procs in the same namespace as self (stops at namespace boundaries).
+    /// Returned slice must be freed by caller.
+    fn collect_namespace_procs_owned(self: *Self, allocator: Allocator) ![]*Proc {
+        var accumulator = try ProcList.initCapacity(allocator, 16);
+        try self._collect_namespace_recursive(&accumulator, allocator, self.namespace);
+        return accumulator.toOwnedSlice(allocator);
+    }
+
+    fn _collect_namespace_recursive(self: *Self, accumulator: *ProcList, allocator: Allocator, ns: *Namespace) !void {
+        try accumulator.append(allocator, self);
+        var iter = self.children.iterator();
+        while (iter.next()) |child_entry| {
+            const child: *Proc = child_entry.key_ptr.*;
+            // stop at namespace boundary
+            if (child.namespace != ns) continue;
+            try child._collect_namespace_recursive(accumulator, allocator, ns);
+        }
+    }
+
+    /// Collect all descendant procs (crosses namespace boundaries).
+    /// Used for process exit to kill entire subtree.
+    /// Returned slice must be freed by caller.
     fn collect_subtree_owned(self: *Self, allocator: Allocator) ![]*Proc {
         var accumulator = try ProcList.initCapacity(allocator, 16);
         try self._collect_subtree_recursive(&accumulator, allocator);
@@ -146,16 +157,18 @@ const Proc = struct {
     }
 
     fn _collect_subtree_recursive(self: *Self, accumulator: *ProcList, allocator: Allocator) !void {
+        try accumulator.append(allocator, self);
         var iter = self.children.iterator();
         while (iter.next()) |child_entry| {
             const child: *Proc = child_entry.key_ptr.*;
             try child._collect_subtree_recursive(accumulator, allocator);
         }
-        try accumulator.append(allocator, self);
     }
 };
 
-/// Tracks kernel to virtual mappings, handling parent/child relationships
+/// Tracks kernel to virtual mappings, handling parent/child relationships.
+/// Note: we don't currently reparent orphaned children to init; killing a
+/// process kills its entire subtree including any nested namespaces.
 const Virtualizer = struct {
     allocator: Allocator,
 
@@ -181,7 +194,7 @@ const Virtualizer = struct {
         if (self.procs.size != 0) return error.InitialProcessExists;
 
         // passing null namespace creates a new one
-        const root_proc = try Proc.init(self.allocator, null, null);
+        const root_proc = try Proc.init(self.allocator, pid, null, null);
         errdefer root_proc.deinit(self.allocator);
 
         try self.procs.put(self.allocator, pid, root_proc);
@@ -191,11 +204,11 @@ const Virtualizer = struct {
 
     pub fn handle_clone(self: *Self, parent_pid: KernelPID, child_pid: KernelPID) !VirtualPID {
         const parent: *Proc = self.procs.get(parent_pid) orelse return error.KernelPIDNotFound;
-        // TODO: handle different clone cases
+        // TODO: handle different clone cases (e.g., CLONE_NEWPID for new namespace)
         // For now, inherit parent namespace
         const namespace = parent.namespace;
 
-        const child = try parent.init_child(self.allocator, namespace);
+        const child = try parent.init_child(self.allocator, child_pid, namespace);
         errdefer parent.deinit_child(child, self.allocator);
 
         try self.procs.put(self.allocator, child_pid, child);
@@ -204,39 +217,20 @@ const Virtualizer = struct {
     }
 
     pub fn handle_process_exit(self: *Self, pid: KernelPID) !void {
-        var target_proc = self.procs.get(pid) orelse return;
+        const target_proc = self.procs.get(pid) orelse return;
 
         // remove target from parent's children
         if (target_proc.parent) |parent| {
             parent.remove_child_link(target_proc);
         }
 
-        // collect all descendent procs
-        var descendent_procs = try target_proc.collect_subtree_owned(self.allocator);
-        defer self.allocator.free(descendent_procs); // frees the slice, not the items
+        // collect all descendant procs (crosses namespace boundaries)
+        const descendant_procs = try target_proc.collect_subtree_owned(self.allocator);
+        defer self.allocator.free(descendant_procs);
 
-        // collect all kernel PIDs of descendents
-        var kernel_pids = try std.ArrayList(KernelPID).initCapacity(self.allocator, descendent_procs.len);
-        defer kernel_pids.deinit(self.allocator);
-        outer: for (descendent_procs) |proc| {
-            var iter = self.procs.iterator();
-            while (iter.next()) |entry| {
-                const entry_proc = entry.value_ptr.*;
-                const entry_kernel_pid = entry.key_ptr.*;
-                if (entry_proc == proc) {
-                    try kernel_pids.append(self.allocator, entry_kernel_pid);
-                    continue :outer;
-                }
-            }
-        }
-
-        // remove entries from proc lookup table
-        for (kernel_pids.items) |kernel_pid| {
-            _ = self.procs.remove(kernel_pid);
-        }
-
-        // deinit the procs themselves
-        for (descendent_procs) |proc| {
+        // remove from lookup table and deinit each proc
+        for (descendant_procs) |proc| {
+            _ = self.procs.remove(proc.pid);
             proc.deinit(self.allocator);
         }
     }
@@ -313,7 +307,7 @@ test "basic tree operations work - add, kill" {
     try std.testing.expectEqual(null, virtualizer.procs.get(b_pid));
 
     // get vpids
-    var a_vpids = try virtualizer.procs.get(a_pid).?.get_pids_owned(allocator);
+    var a_vpids = try virtualizer.procs.get(a_pid).?.get_vpids_owned(allocator);
     try std.testing.expectEqual(3, a_vpids.len);
     try std.testing.expectEqualSlices(VirtualPID, &[3]VirtualPID{ 1, 3, 4 }, a_vpids);
     allocator.free(a_vpids); // free immediately, since we reuse a_vpids var later
@@ -323,7 +317,7 @@ test "basic tree operations work - add, kill" {
     const b_vpid_2 = try virtualizer.handle_clone(a_pid, b_pid_2);
     try std.testing.expectEqual(5, b_vpid_2);
 
-    a_vpids = try virtualizer.procs.get(a_pid).?.get_pids_owned(allocator);
+    a_vpids = try virtualizer.procs.get(a_pid).?.get_vpids_owned(allocator);
     defer allocator.free(a_vpids);
     try std.testing.expectEqual(4, a_vpids.len);
     try std.testing.expectEqualSlices(VirtualPID, &[4]VirtualPID{ 1, 3, 4, 5 }, a_vpids);
@@ -400,7 +394,7 @@ test "collect_tree on single node" {
     _ = try virtualizer.handle_initial_process(100);
     const proc = virtualizer.procs.get(100).?;
 
-    const vpids = try proc.get_pids_owned(allocator);
+    const vpids = try proc.get_vpids_owned(allocator);
     defer allocator.free(vpids);
 
     try std.testing.expectEqual(1, vpids.len);
@@ -444,4 +438,132 @@ test "wide tree with many siblings" {
 
     try std.testing.expectEqual(11, virtualizer.procs.size);
     try std.testing.expectEqual(10, virtualizer.procs.get(parent_pid).?.children.size);
+}
+
+test "nested namespace - get_vpids_owned respects boundaries" {
+    const allocator = std.testing.allocator;
+    var virtualizer = Virtualizer.init(allocator);
+    defer virtualizer.deinit();
+
+    // Create structure:
+    // ns1: A(vpid=1) -> B(vpid=2)
+    //                   B is also ns2 root (vpid=1 in ns2)
+    //                   ns2: B(vpid=1) -> C(vpid=2)
+
+    const a_pid = 100;
+    _ = try virtualizer.handle_initial_process(a_pid);
+    const a_proc = virtualizer.procs.get(a_pid).?;
+
+    // B: child of A but root of new namespace
+    const b_pid = 200;
+    const b_proc = try a_proc.init_child(allocator, b_pid, null); // null = new namespace
+    try virtualizer.procs.put(allocator, b_pid, b_proc);
+
+    try std.testing.expect(b_proc.is_namespace_root());
+    try std.testing.expectEqual(@as(VirtualPID, 1), b_proc.vpid); // vpid 1 in ns2
+    try std.testing.expect(a_proc.namespace != b_proc.namespace);
+
+    // C: child of B in ns2
+    const c_pid = 300;
+    const c_vpid = try virtualizer.handle_clone(b_pid, c_pid);
+    try std.testing.expectEqual(@as(VirtualPID, 2), c_vpid); // vpid 2 in ns2
+
+    const c_proc = virtualizer.procs.get(c_pid).?;
+    try std.testing.expect(b_proc.namespace == c_proc.namespace);
+
+    // get_vpids_owned from A should only see A and B's vpid in ns1
+    // (B appears as vpid 2 in ns1's counter, but wait - B created new ns so it doesn't increment ns1)
+    // Actually B is a child of A in the tree, but B has a different namespace.
+    // So ns1 only contains A.
+    const ns1_vpids = try a_proc.get_vpids_owned(allocator);
+    defer allocator.free(ns1_vpids);
+    try std.testing.expectEqual(1, ns1_vpids.len);
+    try std.testing.expectEqual(@as(VirtualPID, 1), ns1_vpids[0]);
+
+    // get_vpids_owned from B should see B and C (ns2)
+    const ns2_vpids = try b_proc.get_vpids_owned(allocator);
+    defer allocator.free(ns2_vpids);
+    try std.testing.expectEqual(2, ns2_vpids.len);
+    try std.testing.expectEqualSlices(VirtualPID, &[2]VirtualPID{ 1, 2 }, ns2_vpids);
+
+    // get_vpids_owned from C should also see B and C (same namespace)
+    const ns2_vpids_from_c = try c_proc.get_vpids_owned(allocator);
+    defer allocator.free(ns2_vpids_from_c);
+    try std.testing.expectEqual(2, ns2_vpids_from_c.len);
+}
+
+test "nested namespace - killing parent kills nested namespace" {
+    const allocator = std.testing.allocator;
+    var virtualizer = Virtualizer.init(allocator);
+    defer virtualizer.deinit();
+
+    // ns1: A(1) -> B(2, also ns2 root) -> C(2 in ns2)
+    const a_pid = 100;
+    _ = try virtualizer.handle_initial_process(a_pid);
+    const a_proc = virtualizer.procs.get(a_pid).?;
+
+    const b_pid = 200;
+    const b_proc = try a_proc.init_child(allocator, b_pid, null);
+    try virtualizer.procs.put(allocator, b_pid, b_proc);
+
+    const c_pid = 300;
+    _ = try virtualizer.handle_clone(b_pid, c_pid);
+
+    try std.testing.expectEqual(3, virtualizer.procs.size);
+
+    // Kill B - should also kill C (entire subtree, crossing namespace boundary)
+    try virtualizer.handle_process_exit(b_pid);
+
+    try std.testing.expectEqual(1, virtualizer.procs.size);
+    try std.testing.expect(virtualizer.procs.get(a_pid) != null);
+    try std.testing.expectEqual(null, virtualizer.procs.get(b_pid));
+    try std.testing.expectEqual(null, virtualizer.procs.get(c_pid));
+}
+
+test "nested namespace - killing grandparent kills all" {
+    const allocator = std.testing.allocator;
+    var virtualizer = Virtualizer.init(allocator);
+    defer virtualizer.deinit();
+
+    // ns1: A -> B (ns2 root) -> C -> D (ns3 root) -> E
+    const a_pid = 100;
+    _ = try virtualizer.handle_initial_process(a_pid);
+    const a_proc = virtualizer.procs.get(a_pid).?;
+
+    const b_pid = 200;
+    const b_proc = try a_proc.init_child(allocator, b_pid, null);
+    try virtualizer.procs.put(allocator, b_pid, b_proc);
+
+    const c_pid = 300;
+    _ = try virtualizer.handle_clone(b_pid, c_pid);
+    const c_proc = virtualizer.procs.get(c_pid).?;
+
+    const d_pid = 400;
+    const d_proc = try c_proc.init_child(allocator, d_pid, null);
+    try virtualizer.procs.put(allocator, d_pid, d_proc);
+
+    const e_pid = 500;
+    _ = try virtualizer.handle_clone(d_pid, e_pid);
+
+    try std.testing.expectEqual(5, virtualizer.procs.size);
+
+    // Kill A - should kill everything
+    try virtualizer.handle_process_exit(a_pid);
+    try std.testing.expectEqual(0, virtualizer.procs.size);
+}
+
+test "pid is stored correctly" {
+    const allocator = std.testing.allocator;
+    var virtualizer = Virtualizer.init(allocator);
+    defer virtualizer.deinit();
+
+    const a_pid = 12345;
+    _ = try virtualizer.handle_initial_process(a_pid);
+    const a_proc = virtualizer.procs.get(a_pid).?;
+    try std.testing.expectEqual(a_pid, a_proc.pid);
+
+    const b_pid = 67890;
+    _ = try virtualizer.handle_clone(a_pid, b_pid);
+    const b_proc = virtualizer.procs.get(b_pid).?;
+    try std.testing.expectEqual(b_pid, b_proc.pid);
 }
