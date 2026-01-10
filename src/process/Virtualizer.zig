@@ -2,342 +2,123 @@ const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
-const VirtualPID = linux.pid_t;
-const KernelPID = linux.pid_t;
+pub const Proc = @import("Proc.zig");
+pub const Namespace = @import("Namespace.zig");
+pub const KernelPID = Proc.KernelPID;
+pub const VirtualPID = Namespace.VirtualPID;
 
-const CloneFlags = struct {
+const ProcLookup = std.AutoHashMapUnmanaged(KernelPID, *Proc);
+
+const Self = @This();
+
+pub const CloneFlags = struct {
     raw: u64,
 
-    const Self = @This();
-
-    pub fn from(raw: u64) Self {
-        return .{ .raw = raw };
-    }
-
     /// Returns error if unsupported namespace flags are set
-    pub fn check_supported(self: Self) !void {
+    pub fn check_supported(self: CloneFlags) !void {
         if (self.raw & linux.CLONE.NEWUSER != 0) return error.UnsupportedUserNamespace;
         if (self.raw & linux.CLONE.NEWNET != 0) return error.UnsupportedNetNamespace;
         if (self.raw & linux.CLONE.NEWNS != 0) return error.UnsupportedMountNamespace;
     }
 
-    pub fn create_pid_namespace(self: Self) bool {
+    pub fn from(raw: u64) CloneFlags {
+        return .{ .raw = raw };
+    }
+
+    pub fn create_pid_namespace(self: CloneFlags) bool {
         return self.raw & linux.CLONE.NEWPID != 0;
     }
 
-    pub fn is_thread(self: Self) bool {
+    pub fn is_thread(self: CloneFlags) bool {
         return self.raw & linux.CLONE.THREAD != 0;
     }
 
-    pub fn share_parent(self: Self) bool {
+    pub fn share_parent(self: CloneFlags) bool {
         return self.raw & linux.CLONE.PARENT != 0;
-    }
-};
-
-const ProcLookup = std.AutoHashMapUnmanaged(KernelPID, *Proc);
-const VpidLookup = std.AutoHashMapUnmanaged(VirtualPID, *Proc);
-const ProcSet = std.AutoHashMapUnmanaged(*Proc, void);
-const ProcList = std.ArrayList(*Proc);
-
-/// Namespaces are owned by their root proc.
-/// Each namespace tracks all procs visible to it (own procs + procs in child namespaces).
-const Namespace = struct {
-    vpid_counter: VirtualPID = 0,
-    parent: ?*Namespace,
-    procs: VpidLookup = .empty, // vpid → Proc for all visible procs
-
-    const Self = @This();
-
-    pub fn init(allocator: Allocator, parent: ?*Namespace) !*Self {
-        const self = try allocator.create(Self);
-        self.* = .{ .parent = parent };
-        return self;
-    }
-
-    pub fn deinit(self: *Self, allocator: Allocator) void {
-        self.procs.deinit(allocator);
-        allocator.destroy(self);
-    }
-
-    pub fn next_vpid(self: *Self) VirtualPID {
-        self.vpid_counter += 1;
-        return self.vpid_counter;
-    }
-
-    /// Get a proc by its vpid as visible from this namespace
-    pub fn get_proc(self: *Self, vpid: VirtualPID) ?*Proc {
-        return self.procs.get(vpid);
-    }
-
-    /// Register a proc in this namespace and all ancestor namespaces.
-    /// Each namespace assigns its own vpid to the proc.
-    fn register_proc(self: *Self, allocator: Allocator, proc: *Proc) !void {
-        // Register in this namespace (proc already has vpid assigned from this ns)
-        try self.procs.put(allocator, proc.vpid, proc);
-
-        // Register in all ancestor namespaces with their own vpids
-        var ancestor = self.parent;
-        while (ancestor) |ns| {
-            const ancestor_vpid = ns.next_vpid();
-            try ns.procs.put(allocator, ancestor_vpid, proc);
-            ancestor = ns.parent;
-        }
-    }
-
-    /// Unregister a proc from this namespace and all ancestor namespaces.
-    /// Searches by proc pointer since we don't store vpid-per-namespace in Proc.
-    fn unregister_proc(self: *Self, proc: *Proc) void {
-        // Remove from this namespace
-        _ = self.procs.remove(proc.vpid);
-
-        // Remove from all ancestor namespaces (search by pointer)
-        var ancestor = self.parent;
-        while (ancestor) |ns| {
-            var iter = ns.procs.iterator();
-            while (iter.next()) |entry| {
-                if (entry.value_ptr.* == proc) {
-                    _ = ns.procs.remove(entry.key_ptr.*);
-                    break;
-                }
-            }
-            ancestor = ns.parent;
-        }
-    }
-};
-
-const Proc = struct {
-    pid: KernelPID,
-    namespace: *Namespace,
-    vpid: VirtualPID,
-    parent: ?*Proc,
-    children: ProcSet = .empty,
-
-    const Self = @This();
-
-    fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, parent: ?*Proc) !*Self {
-        if (namespace) |ns| {
-            // proc inherits parent namespace
-            const vpid = ns.next_vpid();
-            const self = try allocator.create(Self);
-            self.* = .{
-                .pid = pid,
-                .namespace = ns,
-                .vpid = vpid,
-                .parent = parent,
-            };
-            errdefer allocator.destroy(self);
-
-            // register in own namespace and all ancestors
-            try ns.register_proc(allocator, self);
-
-            return self;
-        }
-
-        // create this proc as root in a new namespace
-        const parent_ns = if (parent) |p| p.namespace else null;
-        var ns = try Namespace.init(allocator, parent_ns);
-        errdefer ns.deinit(allocator);
-
-        const vpid = ns.next_vpid();
-        const self = try allocator.create(Self);
-        self.* = .{
-            .pid = pid,
-            .namespace = ns,
-            .vpid = vpid,
-            .parent = parent,
-        };
-        errdefer allocator.destroy(self);
-
-        // register in own namespace and all ancestors
-        try ns.register_proc(allocator, self);
-
-        return self;
-    }
-
-    pub fn is_namespace_root(self: *Self) bool {
-        if (self.parent) |p| {
-            return self.namespace != p.namespace; // crossed boundary
-        }
-        return true; // no parent = top-level root
-    }
-
-    fn deinit(self: *Self, allocator: Allocator) void {
-        // unregister from own namespace and all ancestors
-        self.namespace.unregister_proc(self);
-
-        if (self.is_namespace_root()) {
-            // the root Proc in a namespace is responsible for deallocating it
-            self.namespace.deinit(allocator);
-        }
-        self.children.deinit(allocator);
-        allocator.destroy(self);
-    }
-
-    fn get_namespace_root(self: *Self) *Proc {
-        var current = self;
-        while (current.parent) |p| {
-            if (current.namespace != p.namespace) break;
-            current = p;
-        }
-        return current;
-    }
-
-    fn init_child(self: *Self, allocator: Allocator, pid: KernelPID, namespace: ?*Namespace) !*Self {
-        const child = try Proc.init(allocator, pid, namespace, self);
-        errdefer child.deinit(allocator);
-
-        try self.children.put(allocator, child, {});
-
-        return child;
-    }
-
-    fn deinit_child(self: *Self, child: *Self, allocator: Allocator) void {
-        self.remove_child_link(child);
-        child.deinit(allocator);
-    }
-
-    fn remove_child_link(self: *Self, child: *Self) void {
-        _ = self.children.remove(child);
-    }
-
-    /// Get a sorted list of all virtual PIDs visible in this process's namespace.
-    /// Does not include processes in nested child namespaces.
-    fn get_vpids_owned(self: *Self, allocator: Allocator) ![]VirtualPID {
-        const root = self.get_namespace_root();
-        const procs = try root.collect_namespace_procs_owned(allocator);
-        defer allocator.free(procs);
-
-        var vpids = try std.ArrayList(VirtualPID).initCapacity(allocator, procs.len);
-        for (procs) |proc| {
-            try vpids.append(allocator, proc.vpid);
-        }
-        std.mem.sort(VirtualPID, vpids.items, {}, std.sort.asc(VirtualPID));
-        return vpids.toOwnedSlice(allocator);
-    }
-
-    /// Collect all procs in the same namespace as self (stops at namespace boundaries).
-    /// Returned slice must be freed by caller.
-    fn collect_namespace_procs_owned(self: *Self, allocator: Allocator) ![]*Proc {
-        var accumulator = try ProcList.initCapacity(allocator, 16);
-        try self._collect_namespace_recursive(&accumulator, allocator, self.namespace);
-        return accumulator.toOwnedSlice(allocator);
-    }
-
-    fn _collect_namespace_recursive(self: *Self, accumulator: *ProcList, allocator: Allocator, ns: *Namespace) !void {
-        try accumulator.append(allocator, self);
-        var iter = self.children.iterator();
-        while (iter.next()) |child_entry| {
-            const child: *Proc = child_entry.key_ptr.*;
-            // stop at namespace boundary
-            if (child.namespace != ns) continue;
-            try child._collect_namespace_recursive(accumulator, allocator, ns);
-        }
-    }
-
-    /// Collect all descendant procs (crosses namespace boundaries).
-    /// Used for process exit to kill entire subtree.
-    /// Returned slice must be freed by caller.
-    fn collect_subtree_owned(self: *Self, allocator: Allocator) ![]*Proc {
-        var accumulator = try ProcList.initCapacity(allocator, 16);
-        try self._collect_subtree_recursive(&accumulator, allocator);
-        return accumulator.toOwnedSlice(allocator);
-    }
-
-    fn _collect_subtree_recursive(self: *Self, accumulator: *ProcList, allocator: Allocator) !void {
-        // Children first, then self - ensures namespace roots are deinitialized after their children
-        var iter = self.children.iterator();
-        while (iter.next()) |child_entry| {
-            const child: *Proc = child_entry.key_ptr.*;
-            try child._collect_subtree_recursive(accumulator, allocator);
-        }
-        try accumulator.append(allocator, self);
     }
 };
 
 /// Tracks kernel to virtual mappings, handling parent/child relationships.
 /// Note: we don't currently reparent orphaned children to init; killing a
 /// process kills its entire subtree including any nested namespaces.
-const Virtualizer = struct {
-    allocator: Allocator,
 
-    // flat list of mappings from kernel to virtual PID
-    // owns underlying procs
-    procs: ProcLookup = .empty,
+allocator: Allocator,
 
-    const Self = @This();
+// flat list of mappings from kernel to virtual PID
+// owns underlying procs
+procs: ProcLookup = .empty,
 
-    pub fn init(allocator: Allocator) Self {
-        return .{ .allocator = allocator };
-    }
+pub fn init(allocator: Allocator) Self {
+    return .{ .allocator = allocator };
+}
 
-    pub fn deinit(self: *Self) void {
-        var iter = self.procs.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.*.parent == null) {
-                const subtree = entry.value_ptr.*.collect_subtree_owned(self.allocator) catch break;
-                defer self.allocator.free(subtree);
-                for (subtree) |proc| {
-                    proc.deinit(self.allocator);
-                }
-                break;
+pub fn deinit(self: *Self) void {
+    var iter = self.procs.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.*.parent == null) {
+            const subtree = entry.value_ptr.*.collect_subtree_owned(self.allocator) catch break;
+            defer self.allocator.free(subtree);
+            for (subtree) |proc| {
+                proc.deinit(self.allocator);
             }
-        }
-        self.procs.deinit(self.allocator);
-    }
-
-    pub fn handle_initial_process(self: *Self, pid: KernelPID) !VirtualPID {
-        if (self.procs.size != 0) return error.InitialProcessExists;
-
-        // passing null namespace creates a new one
-        const root_proc = try Proc.init(self.allocator, pid, null, null);
-        errdefer root_proc.deinit(self.allocator);
-
-        try self.procs.put(self.allocator, pid, root_proc);
-
-        return root_proc.vpid;
-    }
-
-    pub fn handle_clone(self: *Self, parent_pid: KernelPID, child_pid: KernelPID, clone_flags: CloneFlags) !VirtualPID {
-        try clone_flags.check_supported();
-
-        const parent: *Proc = self.procs.get(parent_pid) orelse return error.KernelPIDNotFound;
-
-        // CLONE_NEWPID creates a new PID namespace; otherwise inherit parent's
-        const namespace: ?*Namespace = if (clone_flags.create_pid_namespace())
-            null // triggers new namespace creation in init_child
-        else
-            parent.namespace;
-
-        const child = try parent.init_child(self.allocator, child_pid, namespace);
-        errdefer parent.deinit_child(child, self.allocator);
-
-        try self.procs.put(self.allocator, child_pid, child);
-
-        return child.vpid;
-    }
-
-    pub fn handle_process_exit(self: *Self, pid: KernelPID) !void {
-        const target_proc = self.procs.get(pid) orelse return;
-
-        // remove target from parent's children
-        if (target_proc.parent) |parent| {
-            parent.remove_child_link(target_proc);
-        }
-
-        // collect all descendant procs (crosses namespace boundaries)
-        const descendant_procs = try target_proc.collect_subtree_owned(self.allocator);
-        defer self.allocator.free(descendant_procs);
-
-        // remove from lookup table and deinit each proc
-        for (descendant_procs) |proc| {
-            _ = self.procs.remove(proc.pid);
-            proc.deinit(self.allocator);
+            break;
         }
     }
-};
+    self.procs.deinit(self.allocator);
+}
+
+pub fn handle_initial_process(self: *Self, pid: KernelPID) !VirtualPID {
+    if (self.procs.size != 0) return error.InitialProcessExists;
+
+    // passing null namespace creates a new one
+    const root_proc = try Proc.init(self.allocator, pid, null, null);
+    errdefer root_proc.deinit(self.allocator);
+
+    try self.procs.put(self.allocator, pid, root_proc);
+
+    return root_proc.vpid;
+}
+
+pub fn handle_clone(self: *Self, parent_pid: KernelPID, child_pid: KernelPID, clone_flags: CloneFlags) !VirtualPID {
+    try clone_flags.check_supported();
+
+    const parent: *Proc = self.procs.get(parent_pid) orelse return error.KernelPIDNotFound;
+
+    // CLONE_NEWPID creates a new PID namespace; otherwise inherit parent's
+    const namespace: ?*Namespace = if (clone_flags.create_pid_namespace())
+        null // triggers new namespace creation in init_child
+    else
+        parent.namespace;
+
+    const child = try parent.init_child(self.allocator, child_pid, namespace);
+    errdefer parent.deinit_child(child, self.allocator);
+
+    try self.procs.put(self.allocator, child_pid, child);
+
+    return child.vpid;
+}
+
+pub fn handle_process_exit(self: *Self, pid: KernelPID) !void {
+    const target_proc = self.procs.get(pid) orelse return;
+
+    // remove target from parent's children
+    if (target_proc.parent) |parent| {
+        parent.remove_child_link(target_proc);
+    }
+
+    // collect all descendant procs (crosses namespace boundaries)
+    const descendant_procs = try target_proc.collect_subtree_owned(self.allocator);
+    defer self.allocator.free(descendant_procs);
+
+    // remove from lookup table and deinit each proc
+    for (descendant_procs) |proc| {
+        _ = self.procs.remove(proc.pid);
+        proc.deinit(self.allocator);
+    }
+}
 
 test "state is correct after initial proc" {
-    var virtualizer = Virtualizer.init(std.testing.allocator);
+    var virtualizer = Self.init(std.testing.allocator);
     defer virtualizer.deinit();
     try std.testing.expect(virtualizer.procs.size == 0);
 
@@ -356,7 +137,7 @@ test "state is correct after initial proc" {
 
 test "basic tree operations work - add, kill" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
     try std.testing.expectEqual(0, virtualizer.procs.size);
 
@@ -433,7 +214,7 @@ test "basic tree operations work - add, kill" {
 }
 
 test "handle_initial_process fails if already registered" {
-    var virtualizer = Virtualizer.init(std.testing.allocator);
+    var virtualizer = Self.init(std.testing.allocator);
     defer virtualizer.deinit();
 
     _ = try virtualizer.handle_initial_process(100);
@@ -441,7 +222,7 @@ test "handle_initial_process fails if already registered" {
 }
 
 test "handle_clone fails with unknown parent" {
-    var virtualizer = Virtualizer.init(std.testing.allocator);
+    var virtualizer = Self.init(std.testing.allocator);
     defer virtualizer.deinit();
 
     _ = try virtualizer.handle_initial_process(100);
@@ -449,7 +230,7 @@ test "handle_clone fails with unknown parent" {
 }
 
 test "handle_process_exit on non-existent pid is no-op" {
-    var virtualizer = Virtualizer.init(std.testing.allocator);
+    var virtualizer = Self.init(std.testing.allocator);
     defer virtualizer.deinit();
 
     _ = try virtualizer.handle_initial_process(100);
@@ -458,7 +239,7 @@ test "handle_process_exit on non-existent pid is no-op" {
 }
 
 test "kill intermediate node removes subtree but preserves siblings" {
-    var virtualizer = Virtualizer.init(std.testing.allocator);
+    var virtualizer = Self.init(std.testing.allocator);
     defer virtualizer.deinit();
 
     // a
@@ -488,7 +269,7 @@ test "kill intermediate node removes subtree but preserves siblings" {
 
 test "collect_tree on single node" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     _ = try virtualizer.handle_initial_process(100);
@@ -503,7 +284,7 @@ test "collect_tree on single node" {
 
 test "deep nesting" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     // chain: a -> b -> c -> d -> e
@@ -523,7 +304,7 @@ test "deep nesting" {
 
 test "wide tree with many siblings" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     const parent_pid = 100;
@@ -542,7 +323,7 @@ test "wide tree with many siblings" {
 
 test "nested namespace - get_vpids_owned respects boundaries" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     // Create structure:
@@ -594,7 +375,7 @@ test "nested namespace - get_vpids_owned respects boundaries" {
 
 test "nested namespace - killing parent kills nested namespace" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     // ns1: A(1) -> B(ns2 root, vpid=1) -> C(vpid=2 in ns2)
@@ -620,7 +401,7 @@ test "nested namespace - killing parent kills nested namespace" {
 
 test "nested namespace - killing grandparent kills all" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     // ns1: A -> B (ns2 root) -> C -> D (ns3 root) -> E
@@ -648,7 +429,7 @@ test "nested namespace - killing grandparent kills all" {
 
 test "pid is stored correctly" {
     const allocator = std.testing.allocator;
-    var virtualizer = Virtualizer.init(allocator);
+    var virtualizer = Self.init(allocator);
     defer virtualizer.deinit();
 
     const a_pid = 12345;

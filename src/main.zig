@@ -4,7 +4,7 @@ const Logger = types.Logger;
 const run = @import("setup.zig").run;
 
 test {
-    _ = @import("namespacing.zig");
+    _ = @import("process/Virtualizer.zig");
 }
 
 // Example child process, could be a bash command or anything else

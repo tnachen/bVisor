@@ -1,9 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
-const types = @import("types.zig");
+const types = @import("../types.zig");
 const MemoryBridge = types.MemoryBridge;
 const Logger = types.Logger;
-const Syscall = @import("syscall.zig").Syscall;
+const Syscall = @import("../syscall/Syscall.zig").Syscall;
 
 /// Notification is a wrapper around linux.SECCOMP.notif
 const Self = @This();

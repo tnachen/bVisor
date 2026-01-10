@@ -1,9 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
-const types = @import("../types.zig");
+const types = @import("../../types.zig");
 const MemoryBridge = types.MemoryBridge;
 const Logger = types.Logger;
-const Result = @import("../syscall.zig").Syscall.Result;
+const Result = @import("../Syscall.zig").Syscall.Result;
 
 clock_id: linux.clockid_t,
 flags: linux.TIMER,

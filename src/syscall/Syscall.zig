@@ -1,11 +1,11 @@
 const std = @import("std");
 const linux = std.os.linux;
-const types = @import("./types.zig");
+const types = @import("../types.zig");
 const MemoryBridge = types.MemoryBridge;
 const Logger = types.Logger;
 
 // All supported syscalls
-const ClockNanosleep = @import("./syscalls/ClockNanosleep.zig");
+const ClockNanosleep = @import("handlers/ClockNanosleep.zig");
 
 /// Union of all emulated syscalls.
 pub const Syscall = union(enum) {

@@ -2,8 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("types.zig");
-const syscall = @import("syscall.zig");
-const Notification = @import("Notification.zig");
+const Notification = @import("seccomp/Notification.zig");
 const FD = types.FD;
 const MemoryBridge = types.MemoryBridge;
 const Result = types.LinuxResult;
@@ -21,12 +20,12 @@ pub fn init(notify_fd: FD, child_pid: linux.pid_t) Self {
     return .{ .notify_fd = notify_fd, .logger = logger, .mem_bridge = mem_bridge };
 }
 
-pub fn deinit(self: @This()) void {
+pub fn deinit(self: Self) void {
     posix.close(self.notify_fd);
 }
 
 /// Main notification loop. Reads syscall notifications from the kernel,
-pub fn run(self: @This()) !void {
+pub fn run(self: Self) !void {
     while (true) {
         // Receive syscall notification from kernel
         const notif = try self.recv() orelse return;
