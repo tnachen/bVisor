@@ -7,11 +7,13 @@ const Supervisor = @import("../../Supervisor.zig");
 // All supported syscalls
 const Writev = @import("handlers/Writev.zig");
 const OpenAt = @import("handlers/OpenAt.zig");
+const Clone = @import("handlers/Clone.zig");
 
 /// Union of all virtualized syscalls.
 pub const Syscall = union(enum) {
     writev: Writev,
     openat: OpenAt,
+    clone: Clone,
 
     const Self = @This();
 
@@ -22,6 +24,7 @@ pub const Syscall = union(enum) {
         switch (sys_code) {
             .writev => return .{ .writev = try Writev.parse(notif) },
             .openat => return .{ .openat = try OpenAt.parse(notif) },
+            .clone => return .{ .clone = try Clone.parse(notif) },
             else => return null,
         }
     }
@@ -31,6 +34,14 @@ pub const Syscall = union(enum) {
             // Inline else forces all enum variants to have .handle(supervisor) signatures
             inline else => |inner| inner.handle(supervisor),
         };
+    }
+
+    pub fn handle_exit(self: Self, supervisor: *Supervisor) !void {
+        // only needed for clone
+        if (self == .clone) {
+            return self.clone.handle_exit(supervisor);
+        }
+        return;
     }
 
     pub const Result = union(enum) {

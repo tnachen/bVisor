@@ -43,10 +43,14 @@ pub fn run(self: *Self) !void {
         const notification = try Notification.from_notif(notif);
 
         // Handle (or prepare passthrough resp)
-        const response = try notification.handle(self);
+        const response = try notification.handle_syscall(self);
 
         // Reply to kernel
         try self.send(response.to_notif_resp());
+
+        // Await kernel callbacks if any
+        // For example, clone uses ptrace to capture a single syscall's output
+        try notification.handle_syscall_exit(self);
     }
 }
 

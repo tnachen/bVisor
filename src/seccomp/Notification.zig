@@ -35,7 +35,7 @@ pub fn from_notif(notif: linux.SECCOMP.notif) !Self {
 }
 
 /// Invoke the handler, or perform passthrough
-pub fn handle(self: Self, supervisor: *Supervisor) !Response {
+pub fn handle_syscall(self: Self, supervisor: *Supervisor) !Response {
     switch (self.backend) {
         .kernel => {
             return Response.use_kernel(self.id);
@@ -43,6 +43,18 @@ pub fn handle(self: Self, supervisor: *Supervisor) !Response {
         .virtual => |syscall| {
             const syscall_res = try syscall.handle(supervisor);
             return Response.virtual_res(self.id, syscall_res);
+        },
+    }
+}
+
+/// Await any kernel callbacks
+pub fn handle_syscall_exit(self: Self, supervisor: *Supervisor) !void {
+    switch (self.backend) {
+        .kernel => {
+            return;
+        },
+        .virtual => |syscall| {
+            return syscall.handle_exit(supervisor);
         },
     }
 }
