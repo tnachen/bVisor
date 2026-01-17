@@ -8,24 +8,55 @@ const Supervisor = @import("../../Supervisor.zig");
 const Writev = @import("handlers/Writev.zig");
 const OpenAt = @import("handlers/OpenAt.zig");
 const Clone = @import("handlers/Clone.zig");
+const GetPid = @import("handlers/GetPid.zig");
+const GetPPid = @import("handlers/GetPPid.zig");
+const Kill = @import("handlers/Kill.zig");
+const ExitGroup = @import("handlers/ExitGroup.zig");
 
 /// Union of all virtualized syscalls.
 pub const Syscall = union(enum) {
+    _blocked: Blocked, // TODO: implement at bpf layer
+    _not_implemented: NotImplemented,
     writev: Writev,
     openat: OpenAt,
     clone: Clone,
+    getpid: GetPid,
+    getppid: GetPPid,
+    kill: Kill,
+    exit_group: ExitGroup,
 
     const Self = @This();
 
     /// Parse seccomp notif into Syscall
-    /// Null return means the syscall is not supported and should passthrough
+    /// Null return means the syscall should passthrough // todo: implement at bpf layer
     pub fn parse(notif: linux.SECCOMP.notif) !?Self {
         const sys_code: linux.SYS = @enumFromInt(notif.data.nr);
         switch (sys_code) {
             .writev => return .{ .writev = try Writev.parse(notif) },
             .openat => return .{ .openat = try OpenAt.parse(notif) },
             .clone => return .{ .clone = try Clone.parse(notif) },
-            else => return null,
+            .getpid => return .{ .getpid = GetPid.parse(notif) },
+            .getppid => return .{ .getppid = GetPPid.parse(notif) },
+            .kill => return .{ .kill = Kill.parse(notif) },
+            .exit_group => return .{ .exit_group = ExitGroup.parse(notif) },
+            else => {
+                // Check if the syscall is explicitly blocked
+                for (blocked) |blocked_sys| {
+                    if (blocked_sys == sys_code) {
+                        return .{ ._blocked = Blocked.parse(notif) };
+                    }
+                }
+
+                // Check if the syscall is not implemented
+                for (not_implemented) |not_impl_sys| {
+                    if (not_impl_sys == sys_code) {
+                        return .{ ._not_implemented = NotImplemented.parse(notif) };
+                    }
+                }
+
+                // Else not supported, passthrough
+                return null;
+            },
         }
     }
 
@@ -68,4 +99,47 @@ pub const Syscall = union(enum) {
             };
         }
     };
+};
+
+/// Handler to block any explicitly blocked syscalls
+const blocked = [_]linux.SYS{
+    .ptrace,
+};
+
+const Blocked = struct {
+    const Self = @This();
+
+    pub fn parse(_: linux.SECCOMP.notif) Self {
+        return .{};
+    }
+
+    pub fn handle(_: Self, _: *Supervisor) !Syscall.Result {
+        return Syscall.Result.reply_err(.PERM);
+    }
+};
+
+/// Syscalls that are not yet implemented - return ENOSYS
+const not_implemented = [_]linux.SYS{
+    .gettid,
+    .tkill,
+    .tgkill,
+    .set_tid_address,
+    .wait4,
+    .waitid,
+    .getpgid,
+    .setpgid,
+    .getsid,
+    .setsid,
+};
+
+const NotImplemented = struct {
+    const Self = @This();
+
+    pub fn parse(_: linux.SECCOMP.notif) Self {
+        return .{};
+    }
+
+    pub fn handle(_: Self, _: *Supervisor) !Syscall.Result {
+        return Syscall.Result.reply_err(.NOSYS);
+    }
 };

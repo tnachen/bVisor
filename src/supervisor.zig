@@ -40,6 +40,7 @@ pub fn run(self: *Self) !void {
     while (true) {
         // Receive syscall notification from kernel
         const notif = try self.recv() orelse return;
+
         const notification = try Notification.from_notif(notif);
 
         // Handle (or prepare passthrough resp)

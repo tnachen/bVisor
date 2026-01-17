@@ -11,6 +11,10 @@ test {
     _ = @import("virtual/fs/FdTable.zig");
     _ = @import("virtual/syscall/handlers/OpenAt.zig");
     _ = @import("virtual/syscall/handlers/Clone.zig");
+    _ = @import("virtual/syscall/handlers/GetPid.zig");
+    _ = @import("virtual/syscall/handlers/GetPPid.zig");
+    _ = @import("virtual/syscall/handlers/Kill.zig");
+    _ = @import("virtual/syscall/handlers/ExitGroup.zig");
 }
 
 pub fn main() !void {
