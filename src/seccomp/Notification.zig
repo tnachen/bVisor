@@ -100,7 +100,8 @@ pub const Response = struct {
                     .id = self.id,
                     .flags = 0,
                     .val = reply.val,
-                    .@"error" = reply.errno,
+                    // error field must be negative for failures (see seccomp_unotify(2))
+                    .@"error" = if (reply.errno != 0) -reply.errno else 0,
                 },
             },
         };

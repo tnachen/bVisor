@@ -9,6 +9,7 @@ const Writev = @import("handlers/Writev.zig");
 const OpenAt = @import("handlers/OpenAt.zig");
 const Clone = @import("handlers/Clone.zig");
 const GetPid = @import("handlers/GetPid.zig");
+const GetTid = @import("handlers/GetTid.zig");
 const GetPPid = @import("handlers/GetPPid.zig");
 const Kill = @import("handlers/Kill.zig");
 const ExitGroup = @import("handlers/ExitGroup.zig");
@@ -16,11 +17,12 @@ const ExitGroup = @import("handlers/ExitGroup.zig");
 /// Union of all virtualized syscalls.
 pub const Syscall = union(enum) {
     _blocked: Blocked, // TODO: implement at bpf layer
-    _not_implemented: NotImplemented,
+    _to_implement: ToImplement,
     writev: Writev,
     openat: OpenAt,
     clone: Clone,
     getpid: GetPid,
+    gettid: GetTid,
     getppid: GetPPid,
     kill: Kill,
     exit_group: ExitGroup,
@@ -32,31 +34,106 @@ pub const Syscall = union(enum) {
     pub fn parse(notif: linux.SECCOMP.notif) !?Self {
         const sys_code: linux.SYS = @enumFromInt(notif.data.nr);
         switch (sys_code) {
+            // Always blocked
+            // Sandbox escape
+            .ptrace,
+            .mount,
+            .umount2,
+            .chroot,
+            .pivot_root,
+            .reboot,
+            // Namespace/isolation bypass
+            .setns,
+            .unshare,
+            .seccomp,
+            => return .{ ._blocked = Blocked.parse(notif) },
+
+            // Essential syscalls pass through to kernel
+            // Must be safe and not leak state between procs
+            // User identity
+            .getuid,
+            .geteuid,
+            .getgid,
+            .getegid,
+            // Memory management
+            .brk,
+            .mmap, // note: mmap with MAP_SHARED on files could enable IPC if two sandboxes access the same file. Safe for now since openat is virtualized and controls file access.
+            .mprotect,
+            .munmap,
+            .mremap,
+            .madvise,
+            // Signals
+            .rt_sigaction,
+            .rt_sigprocmask,
+            .rt_sigreturn,
+            .sigaltstack,
+            // Time
+            .clock_gettime,
+            .clock_getres,
+            .gettimeofday,
+            .nanosleep,
+            // Runtime
+            .futex,
+            .set_robust_list,
+            .rseq,
+            .prlimit64,
+            .getrlimit,
+            .getrandom,
+            .uname,
+            .sysinfo,
+            => return null,
+
+            // Implemented
+            // I/O
             .writev => return .{ .writev = try Writev.parse(notif) },
+            // Filesystem
             .openat => return .{ .openat = try OpenAt.parse(notif) },
+            // Process management
             .clone => return .{ .clone = try Clone.parse(notif) },
             .getpid => return .{ .getpid = GetPid.parse(notif) },
+            .gettid => return .{ .gettid = GetTid.parse(notif) },
             .getppid => return .{ .getppid = GetPPid.parse(notif) },
             .kill => return .{ .kill = Kill.parse(notif) },
             .exit_group => return .{ .exit_group = ExitGroup.parse(notif) },
-            else => {
-                // Check if the syscall is explicitly blocked
-                for (blocked) |blocked_sys| {
-                    if (blocked_sys == sys_code) {
-                        return .{ ._blocked = Blocked.parse(notif) };
-                    }
-                }
 
-                // Check if the syscall is not implemented
-                for (not_implemented) |not_impl_sys| {
-                    if (not_impl_sys == sys_code) {
-                        return .{ ._not_implemented = NotImplemented.parse(notif) };
-                    }
-                }
+            // To Implement
+            // FD operations (need virtual FD translation)
+            .read,
+            .write,
+            .close,
+            .dup,
+            .dup3,
+            .pipe2,
+            .lseek,
+            .fstat,
+            .fstatat64,
+            .statx,
+            .ioctl,
+            .fcntl,
+            // Filesystem (need path/FD virtualization)
+            .getcwd,
+            .chdir,
+            .mkdirat,
+            .unlinkat,
+            .faccessat,
+            .getdents64,
+            // Process/threads groups/session
+            .set_tid_address,
+            .tkill,
+            .tgkill,
+            .getpgid,
+            .setpgid,
+            .getsid,
+            .setsid,
+            // Process lifecycle
+            .wait4,
+            .waitid,
+            .execve,
+            // Security-sensitive
+            .prctl,
+            => return .{ ._to_implement = ToImplement.parse(notif) },
 
-                // Else not supported, passthrough
-                return null;
-            },
+            else => return .{ ._blocked = Blocked.parse(notif) },
         }
     }
 
@@ -101,45 +178,32 @@ pub const Syscall = union(enum) {
     };
 };
 
-/// Handler to block any explicitly blocked syscalls
-const blocked = [_]linux.SYS{
-    .ptrace,
-};
-
 const Blocked = struct {
     const Self = @This();
+    sys_nr: i32,
+    pid: linux.pid_t,
 
-    pub fn parse(_: linux.SECCOMP.notif) Self {
-        return .{};
+    pub fn parse(notif: linux.SECCOMP.notif) Self {
+        return .{ .sys_nr = notif.data.nr, .pid = @intCast(notif.pid) };
     }
 
-    pub fn handle(_: Self, _: *Supervisor) !Syscall.Result {
+    pub fn handle(self: Self, supervisor: *Supervisor) !Syscall.Result {
+        supervisor.logger.log("Blocked syscall: {d} from pid {d}", .{ self.sys_nr, self.pid });
         return Syscall.Result.reply_err(.PERM);
     }
 };
 
-/// Syscalls that are not yet implemented - return ENOSYS
-const not_implemented = [_]linux.SYS{
-    .gettid,
-    .tkill,
-    .tgkill,
-    .set_tid_address,
-    .wait4,
-    .waitid,
-    .getpgid,
-    .setpgid,
-    .getsid,
-    .setsid,
-};
-
-const NotImplemented = struct {
+const ToImplement = struct {
     const Self = @This();
+    sys_nr: i32,
+    pid: linux.pid_t,
 
-    pub fn parse(_: linux.SECCOMP.notif) Self {
-        return .{};
+    pub fn parse(notif: linux.SECCOMP.notif) Self {
+        return .{ .sys_nr = notif.data.nr, .pid = @intCast(notif.pid) };
     }
 
-    pub fn handle(_: Self, _: *Supervisor) !Syscall.Result {
+    pub fn handle(self: Self, supervisor: *Supervisor) !Syscall.Result {
+        supervisor.logger.log("ToImplement syscall: {d} from pid {d}", .{ self.sys_nr, self.pid });
         return Syscall.Result.reply_err(.NOSYS);
     }
 };
