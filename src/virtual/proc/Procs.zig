@@ -5,15 +5,15 @@ const Allocator = std.mem.Allocator;
 pub const Proc = @import("Proc.zig");
 pub const Namespace = @import("Namespace.zig");
 pub const FdTable = @import("../fs/FdTable.zig");
+pub const PendingClones = @import("PendingClones.zig");
 pub const KernelPID = Proc.KernelPID;
-pub const VirtualPID = Namespace.VirtualPID;
 
 const ProcLookup = std.AutoHashMapUnmanaged(KernelPID, *Proc);
 
 const Self = @This();
 
 pub const CloneFlags = struct {
-    raw: u64,
+    raw: u64 = 0,
 
     /// Returns error if unsupported namespace flags are set
     pub fn check_supported(self: CloneFlags) !void {
@@ -48,16 +48,22 @@ pub const CloneFlags = struct {
 /// process kills its entire subtree including any nested namespaces.
 allocator: Allocator,
 
-// flat list of mappings from kernel to virtual PID
+// flat list of mappings from kernel PID to Proc
 // owns underlying procs
-procs: ProcLookup = .empty,
+lookup: ProcLookup = .empty,
+
+// stores clone flags until child is discovered
+pending_clones: PendingClones,
 
 pub fn init(allocator: Allocator) Self {
-    return .{ .allocator = allocator };
+    return .{
+        .allocator = allocator,
+        .pending_clones = PendingClones.init(allocator),
+    };
 }
 
 pub fn deinit(self: *Self) void {
-    var iter = self.procs.iterator();
+    var iter = self.lookup.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.*.parent == null) {
             const subtree = entry.value_ptr.*.collect_subtree_owned(self.allocator) catch break;
@@ -68,25 +74,44 @@ pub fn deinit(self: *Self) void {
             break;
         }
     }
-    self.procs.deinit(self.allocator);
+    self.lookup.deinit(self.allocator);
+    self.pending_clones.deinit();
 }
 
-pub fn handle_initial_process(self: *Self, pid: KernelPID) !VirtualPID {
-    if (self.procs.size != 0) return error.InitialProcessExists;
+/// Get a proc by kernel PID. If unknown, attempts lazy registration
+/// by walking the parent chain via /proc.
+pub fn get(self: *Self, pid: KernelPID) !*Proc {
+    if (self.lookup.get(pid)) |proc| return proc;
+    return self.register_from_kernel(pid);
+}
+
+/// Lazy registration: read parent from /proc, walk chain to find sandbox ancestor
+fn register_from_kernel(self: *Self, child_pid: KernelPID) !*Proc {
+    const ppid = try read_ppid(child_pid);
+
+    // Try to get parent - this may recursively register ancestors
+    const parent = self.lookup.get(ppid) orelse return error.NotInSandbox;
+
+    // Get clone flags if stored, otherwise use defaults
+    const flags = self.pending_clones.remove(ppid) orelse CloneFlags{};
+
+    return self.register_child(parent, child_pid, flags);
+}
+
+/// Register the initial sandbox root process
+pub fn handle_initial_process(self: *Self, pid: KernelPID) !void {
+    if (self.lookup.count() != 0) return error.InitialProcessExists;
 
     // passing null namespace/fd_table creates new ones
     const root_proc = try Proc.init(self.allocator, pid, null, null, null);
     errdefer root_proc.deinit(self.allocator);
 
-    try self.procs.put(self.allocator, pid, root_proc);
-
-    return root_proc.vpid;
+    try self.lookup.put(self.allocator, pid, root_proc);
 }
 
-pub fn handle_clone(self: *Self, parent_pid: KernelPID, child_pid: KernelPID, clone_flags: CloneFlags) !VirtualPID {
+/// Register a child process with given parent and flags
+pub fn register_child(self: *Self, parent: *Proc, child_pid: KernelPID, clone_flags: CloneFlags) !*Proc {
     try clone_flags.check_supported();
-
-    const parent: *Proc = self.procs.get(parent_pid) orelse return error.KernelPIDNotFound;
 
     // CLONE_NEWPID creates a new PID namespace; otherwise inherit parent's
     const namespace: ?*Namespace = if (clone_flags.create_pid_namespace())
@@ -104,13 +129,13 @@ pub fn handle_clone(self: *Self, parent_pid: KernelPID, child_pid: KernelPID, cl
     const child = try parent.init_child(self.allocator, child_pid, namespace, fd_table);
     errdefer parent.deinit_child(child, self.allocator);
 
-    try self.procs.put(self.allocator, child_pid, child);
+    try self.lookup.put(self.allocator, child_pid, child);
 
-    return child.vpid;
+    return child;
 }
 
 pub fn handle_process_exit(self: *Self, pid: KernelPID) !void {
-    const target_proc = self.procs.get(pid) orelse return;
+    const target_proc = self.lookup.get(pid) orelse return;
 
     // remove target from parent's children
     if (target_proc.parent) |parent| {
@@ -123,34 +148,64 @@ pub fn handle_process_exit(self: *Self, pid: KernelPID) !void {
 
     // remove from lookup table and deinit each proc
     for (descendant_procs) |proc| {
-        _ = self.procs.remove(proc.pid);
+        _ = self.lookup.remove(proc.pid);
         proc.deinit(self.allocator);
     }
 }
 
+/// Read parent PID from /proc/[pid]/status
+fn read_ppid(pid: KernelPID) !KernelPID {
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid}) catch unreachable;
+
+    const fd = linux.open(@ptrCast(path.ptr), .{ .ACCMODE = .RDONLY }, 0);
+    if (fd > std.math.maxInt(i32)) {
+        return error.CannotReadProc;
+    }
+    defer _ = linux.close(@intCast(fd));
+
+    var buf: [1024]u8 = undefined;
+    const n = linux.read(@intCast(fd), &buf, buf.len);
+    if (n > buf.len) {
+        return error.CannotReadProc;
+    }
+
+    // Parse "PPid:\t<pid>" line
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "PPid:")) {
+            const ppid_str = std.mem.trim(u8, line[5..], " \t");
+            return std.fmt.parseInt(KernelPID, ppid_str, 10) catch return error.CannotReadProc;
+        }
+    }
+
+    return error.CannotReadProc;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 test "state is correct after initial proc" {
     var v_procs = Self.init(std.testing.allocator);
     defer v_procs.deinit();
-    try std.testing.expect(v_procs.procs.size == 0);
+    try std.testing.expect(v_procs.lookup.count() == 0);
 
-    // supervisor spawns child proc of say PID=22, need to register that virtually
     const init_pid = 22;
-    const init_vpid = try v_procs.handle_initial_process(init_pid);
-    try std.testing.expectEqual(1, init_vpid);
-    try std.testing.expectEqual(1, v_procs.procs.size);
-    const proc = v_procs.procs.get(init_pid).?;
-    try std.testing.expectEqual(init_vpid, proc.vpid);
+    try v_procs.handle_initial_process(init_pid);
+    try std.testing.expectEqual(1, v_procs.lookup.count());
+    const proc = v_procs.lookup.get(init_pid).?;
+    try std.testing.expectEqual(init_pid, proc.pid);
     try std.testing.expectEqual(null, proc.parent);
-    try std.testing.expectEqual(0, proc.children.size);
+    try std.testing.expectEqual(0, proc.children.count());
     try std.testing.expect(proc.is_namespace_root());
-    try std.testing.expectEqual(@as(VirtualPID, 1), proc.get_namespace_root().vpid);
 }
 
 test "basic tree operations work - add, kill" {
     const allocator = std.testing.allocator;
     var v_procs = Self.init(allocator);
     defer v_procs.deinit();
-    try std.testing.expectEqual(0, v_procs.procs.size);
+    try std.testing.expectEqual(0, v_procs.lookup.count());
 
     // create procs of this layout
     // a
@@ -159,94 +214,83 @@ test "basic tree operations work - add, kill" {
     //   - d
 
     const a_pid = 33;
-    const a_vpid = try v_procs.handle_initial_process(a_pid);
-    try std.testing.expectEqual(1, v_procs.procs.size);
-    try std.testing.expectEqual(1, a_vpid);
+    try v_procs.handle_initial_process(a_pid);
+    try std.testing.expectEqual(1, v_procs.lookup.count());
 
     const b_pid = 44;
-    const b_vpid = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(0));
-    try std.testing.expectEqual(2, b_vpid);
-    try std.testing.expectEqual(2, v_procs.procs.size);
-    try std.testing.expectEqual(1, v_procs.procs.get(a_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(b_pid).?.children.size);
+    const a_proc = v_procs.lookup.get(a_pid).?;
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(0));
+    try std.testing.expectEqual(2, v_procs.lookup.count());
+    try std.testing.expectEqual(1, v_procs.lookup.get(a_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(b_pid).?.children.count());
 
     const c_pid = 55;
-    const c_vpid = try v_procs.handle_clone(a_pid, c_pid, CloneFlags.from(0));
-    try std.testing.expectEqual(3, c_vpid);
-    try std.testing.expectEqual(3, v_procs.procs.size);
-    try std.testing.expectEqual(2, v_procs.procs.get(a_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(c_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(b_pid).?.children.size);
+    _ = try v_procs.register_child(a_proc, c_pid, CloneFlags.from(0));
+    try std.testing.expectEqual(3, v_procs.lookup.count());
+    try std.testing.expectEqual(2, v_procs.lookup.get(a_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(c_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(b_pid).?.children.count());
 
     const d_pid = 66;
-    const d_vpid = try v_procs.handle_clone(c_pid, d_pid, CloneFlags.from(0));
-    try std.testing.expectEqual(4, d_vpid);
-    try std.testing.expectEqual(4, v_procs.procs.size);
-    try std.testing.expectEqual(2, v_procs.procs.get(a_pid).?.children.size);
-    try std.testing.expectEqual(1, v_procs.procs.get(c_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(b_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(d_pid).?.children.size);
+    const c_proc = v_procs.lookup.get(c_pid).?;
+    _ = try v_procs.register_child(c_proc, d_pid, CloneFlags.from(0));
+    try std.testing.expectEqual(4, v_procs.lookup.count());
+    try std.testing.expectEqual(2, v_procs.lookup.get(a_pid).?.children.count());
+    try std.testing.expectEqual(1, v_procs.lookup.get(c_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(b_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(d_pid).?.children.count());
 
     // shrink to
     // a
     // - c
     //   - d
     try v_procs.handle_process_exit(b_pid);
-    try std.testing.expectEqual(3, v_procs.procs.size);
-    try std.testing.expectEqual(1, v_procs.procs.get(a_pid).?.children.size);
-    try std.testing.expectEqual(1, v_procs.procs.get(c_pid).?.children.size);
-    try std.testing.expectEqual(0, v_procs.procs.get(d_pid).?.children.size);
-    try std.testing.expectEqual(null, v_procs.procs.get(b_pid));
+    try std.testing.expectEqual(3, v_procs.lookup.count());
+    try std.testing.expectEqual(1, v_procs.lookup.get(a_pid).?.children.count());
+    try std.testing.expectEqual(1, v_procs.lookup.get(c_pid).?.children.count());
+    try std.testing.expectEqual(0, v_procs.lookup.get(d_pid).?.children.count());
+    try std.testing.expectEqual(null, v_procs.lookup.get(b_pid));
 
-    // get vpids
-    var a_vpids = try v_procs.procs.get(a_pid).?.get_vpids_owned(allocator);
-    try std.testing.expectEqual(3, a_vpids.len);
-    try std.testing.expectEqualSlices(VirtualPID, &[3]VirtualPID{ 1, 3, 4 }, a_vpids);
-    allocator.free(a_vpids); // free immediately, since we reuse a_vpids var later
+    // get pids
+    var a_pids = try v_procs.lookup.get(a_pid).?.get_pids_owned(allocator);
+    try std.testing.expectEqual(3, a_pids.len);
+    try std.testing.expectEqualSlices(KernelPID, &[3]KernelPID{ 33, 55, 66 }, a_pids);
+    allocator.free(a_pids);
 
-    // re-add b, should issue a new vpid 5
+    // re-add b, should work
     const b_pid_2 = 45;
-    const b_vpid_2 = try v_procs.handle_clone(a_pid, b_pid_2, CloneFlags.from(0));
-    try std.testing.expectEqual(5, b_vpid_2);
+    _ = try v_procs.register_child(v_procs.lookup.get(a_pid).?, b_pid_2, CloneFlags.from(0));
 
-    a_vpids = try v_procs.procs.get(a_pid).?.get_vpids_owned(allocator);
-    defer allocator.free(a_vpids);
-    try std.testing.expectEqual(4, a_vpids.len);
-    try std.testing.expectEqualSlices(VirtualPID, &[4]VirtualPID{ 1, 3, 4, 5 }, a_vpids);
+    a_pids = try v_procs.lookup.get(a_pid).?.get_pids_owned(allocator);
+    defer allocator.free(a_pids);
+    try std.testing.expectEqual(4, a_pids.len);
+    try std.testing.expectEqualSlices(KernelPID, &[4]KernelPID{ 33, 45, 55, 66 }, a_pids);
 
     // clear whole tree
     try v_procs.handle_process_exit(a_pid);
-    try std.testing.expectEqual(0, v_procs.procs.size);
-    try std.testing.expectEqual(null, v_procs.procs.get(a_pid));
-    try std.testing.expectEqual(null, v_procs.procs.get(b_pid));
-    try std.testing.expectEqual(null, v_procs.procs.get(b_pid_2));
-    try std.testing.expectEqual(null, v_procs.procs.get(c_pid));
-    try std.testing.expectEqual(null, v_procs.procs.get(d_pid));
+    try std.testing.expectEqual(0, v_procs.lookup.count());
+    try std.testing.expectEqual(null, v_procs.lookup.get(a_pid));
+    try std.testing.expectEqual(null, v_procs.lookup.get(b_pid));
+    try std.testing.expectEqual(null, v_procs.lookup.get(b_pid_2));
+    try std.testing.expectEqual(null, v_procs.lookup.get(c_pid));
+    try std.testing.expectEqual(null, v_procs.lookup.get(d_pid));
 }
 
 test "handle_initial_process fails if already registered" {
     var v_procs = Self.init(std.testing.allocator);
     defer v_procs.deinit();
 
-    _ = try v_procs.handle_initial_process(100);
+    try v_procs.handle_initial_process(100);
     try std.testing.expectError(error.InitialProcessExists, v_procs.handle_initial_process(200));
-}
-
-test "handle_clone fails with unknown parent" {
-    var v_procs = Self.init(std.testing.allocator);
-    defer v_procs.deinit();
-
-    _ = try v_procs.handle_initial_process(100);
-    try std.testing.expectError(error.KernelPIDNotFound, v_procs.handle_clone(999, 200, CloneFlags.from(0)));
 }
 
 test "handle_process_exit on non-existent pid is no-op" {
     var v_procs = Self.init(std.testing.allocator);
     defer v_procs.deinit();
 
-    _ = try v_procs.handle_initial_process(100);
+    try v_procs.handle_initial_process(100);
     try v_procs.handle_process_exit(999);
-    try std.testing.expectEqual(1, v_procs.procs.size);
+    try std.testing.expectEqual(1, v_procs.lookup.count());
 }
 
 test "kill intermediate node removes subtree but preserves siblings" {
@@ -258,24 +302,27 @@ test "kill intermediate node removes subtree but preserves siblings" {
     // - c
     //   - d
     const a_pid = 10;
-    _ = try v_procs.handle_initial_process(a_pid);
-    const b_pid = 20;
-    _ = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(0));
-    const c_pid = 30;
-    _ = try v_procs.handle_clone(a_pid, c_pid, CloneFlags.from(0));
-    const d_pid = 40;
-    _ = try v_procs.handle_clone(c_pid, d_pid, CloneFlags.from(0));
+    try v_procs.handle_initial_process(a_pid);
+    const a_proc = v_procs.lookup.get(a_pid).?;
 
-    try std.testing.expectEqual(4, v_procs.procs.size);
+    const b_pid = 20;
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(0));
+    const c_pid = 30;
+    _ = try v_procs.register_child(a_proc, c_pid, CloneFlags.from(0));
+    const c_proc = v_procs.lookup.get(c_pid).?;
+    const d_pid = 40;
+    _ = try v_procs.register_child(c_proc, d_pid, CloneFlags.from(0));
+
+    try std.testing.expectEqual(4, v_procs.lookup.count());
 
     // kill c (intermediate) - should also remove d but preserve a and b
     try v_procs.handle_process_exit(c_pid);
 
-    try std.testing.expectEqual(2, v_procs.procs.size);
-    try std.testing.expect(v_procs.procs.get(a_pid) != null);
-    try std.testing.expect(v_procs.procs.get(b_pid) != null);
-    try std.testing.expectEqual(null, v_procs.procs.get(c_pid));
-    try std.testing.expectEqual(null, v_procs.procs.get(d_pid));
+    try std.testing.expectEqual(2, v_procs.lookup.count());
+    try std.testing.expect(v_procs.lookup.get(a_pid) != null);
+    try std.testing.expect(v_procs.lookup.get(b_pid) != null);
+    try std.testing.expectEqual(null, v_procs.lookup.get(c_pid));
+    try std.testing.expectEqual(null, v_procs.lookup.get(d_pid));
 }
 
 test "collect_tree on single node" {
@@ -283,14 +330,14 @@ test "collect_tree on single node" {
     var v_procs = Self.init(allocator);
     defer v_procs.deinit();
 
-    _ = try v_procs.handle_initial_process(100);
-    const proc = v_procs.procs.get(100).?;
+    try v_procs.handle_initial_process(100);
+    const proc = v_procs.lookup.get(100).?;
 
-    const vpids = try proc.get_vpids_owned(allocator);
-    defer allocator.free(vpids);
+    const pids = try proc.get_pids_owned(allocator);
+    defer allocator.free(pids);
 
-    try std.testing.expectEqual(1, vpids.len);
-    try std.testing.expectEqual(1, vpids[0]);
+    try std.testing.expectEqual(1, pids.len);
+    try std.testing.expectEqual(100, pids[0]);
 }
 
 test "deep nesting" {
@@ -301,16 +348,17 @@ test "deep nesting" {
     // chain: a -> b -> c -> d -> e
     var pids = [_]KernelPID{ 10, 20, 30, 40, 50 };
 
-    _ = try v_procs.handle_initial_process(pids[0]);
+    try v_procs.handle_initial_process(pids[0]);
     for (1..5) |i| {
-        _ = try v_procs.handle_clone(pids[i - 1], pids[i], CloneFlags.from(0));
+        const parent = v_procs.lookup.get(pids[i - 1]).?;
+        _ = try v_procs.register_child(parent, pids[i], CloneFlags.from(0));
     }
 
-    try std.testing.expectEqual(5, v_procs.procs.size);
+    try std.testing.expectEqual(5, v_procs.lookup.count());
 
     // kill middle (c) - should remove c, d, e
     try v_procs.handle_process_exit(pids[2]);
-    try std.testing.expectEqual(2, v_procs.procs.size);
+    try std.testing.expectEqual(2, v_procs.lookup.count());
 }
 
 test "wide tree with many siblings" {
@@ -319,69 +367,62 @@ test "wide tree with many siblings" {
     defer v_procs.deinit();
 
     const parent_pid = 100;
-    _ = try v_procs.handle_initial_process(parent_pid);
+    try v_procs.handle_initial_process(parent_pid);
+    const parent = v_procs.lookup.get(parent_pid).?;
 
     // add 10 children
     for (1..11) |i| {
         const child_pid: KernelPID = @intCast(100 + i);
-        const vpid = try v_procs.handle_clone(parent_pid, child_pid, CloneFlags.from(0));
-        try std.testing.expectEqual(@as(VirtualPID, @intCast(i + 1)), vpid);
+        _ = try v_procs.register_child(parent, child_pid, CloneFlags.from(0));
     }
 
-    try std.testing.expectEqual(11, v_procs.procs.size);
-    try std.testing.expectEqual(10, v_procs.procs.get(parent_pid).?.children.size);
+    try std.testing.expectEqual(11, v_procs.lookup.count());
+    try std.testing.expectEqual(10, v_procs.lookup.get(parent_pid).?.children.count());
 }
 
-test "nested namespace - get_vpids_owned respects boundaries" {
+test "nested namespace - get_pids_owned respects boundaries" {
     const allocator = std.testing.allocator;
     var v_procs = Self.init(allocator);
     defer v_procs.deinit();
 
     // Create structure:
-    // ns1: A(vpid=1) -> B(vpid=2)
-    //                   B is also ns2 root (vpid=1 in ns2)
-    //                   ns2: B(vpid=1) -> C(vpid=2)
+    // ns1: A -> B (B is ns2 root with CLONE_NEWPID)
+    //           ns2: B -> C
 
     const a_pid = 100;
-    _ = try v_procs.handle_initial_process(a_pid);
-    const a_proc = v_procs.procs.get(a_pid).?;
+    try v_procs.handle_initial_process(a_pid);
+    const a_proc = v_procs.lookup.get(a_pid).?;
 
     // B: child of A but root of new namespace (CLONE_NEWPID)
     const b_pid = 200;
-    _ = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
-    const b_proc = v_procs.procs.get(b_pid).?;
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    const b_proc = v_procs.lookup.get(b_pid).?;
 
     try std.testing.expect(b_proc.is_namespace_root());
-    try std.testing.expectEqual(@as(VirtualPID, 1), b_proc.vpid); // vpid 1 in ns2
     try std.testing.expect(a_proc.namespace != b_proc.namespace);
 
     // C: child of B in ns2
     const c_pid = 300;
-    const c_vpid = try v_procs.handle_clone(b_pid, c_pid, CloneFlags.from(0));
-    try std.testing.expectEqual(@as(VirtualPID, 2), c_vpid); // vpid 2 in ns2
-
-    const c_proc = v_procs.procs.get(c_pid).?;
+    _ = try v_procs.register_child(b_proc, c_pid, CloneFlags.from(0));
+    const c_proc = v_procs.lookup.get(c_pid).?;
     try std.testing.expect(b_proc.namespace == c_proc.namespace);
 
-    // get_vpids_owned from A should only see A and B's vpid in ns1
-    // (B appears as vpid 2 in ns1's counter, but wait - B created new ns so it doesn't increment ns1)
-    // Actually B is a child of A in the tree, but B has a different namespace.
-    // So ns1 only contains A.
-    const ns1_vpids = try a_proc.get_vpids_owned(allocator);
-    defer allocator.free(ns1_vpids);
-    try std.testing.expectEqual(1, ns1_vpids.len);
-    try std.testing.expectEqual(@as(VirtualPID, 1), ns1_vpids[0]);
+    // get_pids_owned from A should only see A (B created new ns)
+    const ns1_pids = try a_proc.get_pids_owned(allocator);
+    defer allocator.free(ns1_pids);
+    try std.testing.expectEqual(1, ns1_pids.len);
+    try std.testing.expectEqual(a_pid, ns1_pids[0]);
 
-    // get_vpids_owned from B should see B and C (ns2)
-    const ns2_vpids = try b_proc.get_vpids_owned(allocator);
-    defer allocator.free(ns2_vpids);
-    try std.testing.expectEqual(2, ns2_vpids.len);
-    try std.testing.expectEqualSlices(VirtualPID, &[2]VirtualPID{ 1, 2 }, ns2_vpids);
+    // get_pids_owned from B should see B and C (ns2)
+    const ns2_pids = try b_proc.get_pids_owned(allocator);
+    defer allocator.free(ns2_pids);
+    try std.testing.expectEqual(2, ns2_pids.len);
+    try std.testing.expectEqualSlices(KernelPID, &[2]KernelPID{ 200, 300 }, ns2_pids);
 
-    // get_vpids_owned from C should also see B and C (same namespace)
-    const ns2_vpids_from_c = try c_proc.get_vpids_owned(allocator);
-    defer allocator.free(ns2_vpids_from_c);
-    try std.testing.expectEqual(2, ns2_vpids_from_c.len);
+    // get_pids_owned from C should also see B and C (same namespace)
+    const ns2_pids_from_c = try c_proc.get_pids_owned(allocator);
+    defer allocator.free(ns2_pids_from_c);
+    try std.testing.expectEqual(2, ns2_pids_from_c.len);
 }
 
 test "nested namespace - killing parent kills nested namespace" {
@@ -389,25 +430,27 @@ test "nested namespace - killing parent kills nested namespace" {
     var v_procs = Self.init(allocator);
     defer v_procs.deinit();
 
-    // ns1: A(1) -> B(ns2 root, vpid=1) -> C(vpid=2 in ns2)
+    // ns1: A -> B(ns2 root) -> C
     const a_pid = 100;
-    _ = try v_procs.handle_initial_process(a_pid);
+    try v_procs.handle_initial_process(a_pid);
+    const a_proc = v_procs.lookup.get(a_pid).?;
 
     const b_pid = 200;
-    _ = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    const b_proc = v_procs.lookup.get(b_pid).?;
 
     const c_pid = 300;
-    _ = try v_procs.handle_clone(b_pid, c_pid, CloneFlags.from(0));
+    _ = try v_procs.register_child(b_proc, c_pid, CloneFlags.from(0));
 
-    try std.testing.expectEqual(3, v_procs.procs.size);
+    try std.testing.expectEqual(3, v_procs.lookup.count());
 
     // Kill B - should also kill C (entire subtree, crossing namespace boundary)
     try v_procs.handle_process_exit(b_pid);
 
-    try std.testing.expectEqual(1, v_procs.procs.size);
-    try std.testing.expect(v_procs.procs.get(a_pid) != null);
-    try std.testing.expectEqual(null, v_procs.procs.get(b_pid));
-    try std.testing.expectEqual(null, v_procs.procs.get(c_pid));
+    try std.testing.expectEqual(1, v_procs.lookup.count());
+    try std.testing.expect(v_procs.lookup.get(a_pid) != null);
+    try std.testing.expectEqual(null, v_procs.lookup.get(b_pid));
+    try std.testing.expectEqual(null, v_procs.lookup.get(c_pid));
 }
 
 test "nested namespace - killing grandparent kills all" {
@@ -417,25 +460,29 @@ test "nested namespace - killing grandparent kills all" {
 
     // ns1: A -> B (ns2 root) -> C -> D (ns3 root) -> E
     const a_pid = 100;
-    _ = try v_procs.handle_initial_process(a_pid);
+    try v_procs.handle_initial_process(a_pid);
+    const a_proc = v_procs.lookup.get(a_pid).?;
 
     const b_pid = 200;
-    _ = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    const b_proc = v_procs.lookup.get(b_pid).?;
 
     const c_pid = 300;
-    _ = try v_procs.handle_clone(b_pid, c_pid, CloneFlags.from(0));
+    _ = try v_procs.register_child(b_proc, c_pid, CloneFlags.from(0));
+    const c_proc = v_procs.lookup.get(c_pid).?;
 
     const d_pid = 400;
-    _ = try v_procs.handle_clone(c_pid, d_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    _ = try v_procs.register_child(c_proc, d_pid, CloneFlags.from(linux.CLONE.NEWPID));
+    const d_proc = v_procs.lookup.get(d_pid).?;
 
     const e_pid = 500;
-    _ = try v_procs.handle_clone(d_pid, e_pid, CloneFlags.from(0));
+    _ = try v_procs.register_child(d_proc, e_pid, CloneFlags.from(0));
 
-    try std.testing.expectEqual(5, v_procs.procs.size);
+    try std.testing.expectEqual(5, v_procs.lookup.count());
 
     // Kill A - should kill everything
     try v_procs.handle_process_exit(a_pid);
-    try std.testing.expectEqual(0, v_procs.procs.size);
+    try std.testing.expectEqual(0, v_procs.lookup.count());
 }
 
 test "pid is stored correctly" {
@@ -444,12 +491,54 @@ test "pid is stored correctly" {
     defer v_procs.deinit();
 
     const a_pid = 12345;
-    _ = try v_procs.handle_initial_process(a_pid);
-    const a_proc = v_procs.procs.get(a_pid).?;
+    try v_procs.handle_initial_process(a_pid);
+    const a_proc = v_procs.lookup.get(a_pid).?;
     try std.testing.expectEqual(a_pid, a_proc.pid);
 
     const b_pid = 67890;
-    _ = try v_procs.handle_clone(a_pid, b_pid, CloneFlags.from(0));
-    const b_proc = v_procs.procs.get(b_pid).?;
+    _ = try v_procs.register_child(a_proc, b_pid, CloneFlags.from(0));
+    const b_proc = v_procs.lookup.get(b_pid).?;
     try std.testing.expectEqual(b_pid, b_proc.pid);
+}
+
+test "can_see - same namespace" {
+    const allocator = std.testing.allocator;
+    var v_procs = Self.init(allocator);
+    defer v_procs.deinit();
+
+    try v_procs.handle_initial_process(100);
+    const a = v_procs.lookup.get(100).?;
+    _ = try v_procs.register_child(a, 200, CloneFlags.from(0));
+    const b = v_procs.lookup.get(200).?;
+
+    try std.testing.expect(a.can_see(b));
+    try std.testing.expect(b.can_see(a));
+}
+
+test "can_see - child namespace cannot see parent-only procs" {
+    const allocator = std.testing.allocator;
+    var v_procs = Self.init(allocator);
+    defer v_procs.deinit();
+
+    try v_procs.handle_initial_process(100);
+    const a = v_procs.lookup.get(100).?;
+
+    // B is in new namespace
+    _ = try v_procs.register_child(a, 200, CloneFlags.from(linux.CLONE.NEWPID));
+    const b = v_procs.lookup.get(200).?;
+
+    // A can see B (B is registered in parent namespace too)
+    try std.testing.expect(a.can_see(b));
+    // B cannot see A (A is only in parent namespace)
+    try std.testing.expect(!b.can_see(a));
+}
+
+test "pending_clones - append and remove" {
+    var v_procs = Self.init(std.testing.allocator);
+    defer v_procs.deinit();
+
+    try v_procs.pending_clones.append(100, CloneFlags.from(123));
+    const flags = v_procs.pending_clones.remove(100);
+    try std.testing.expect(flags != null);
+    try std.testing.expectEqual(@as(u64, 123), flags.?.raw);
 }

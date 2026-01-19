@@ -62,6 +62,7 @@ pub fn smoke_test(_: std.Io) void {
         // Signals (needed for job control, ctrl-c)
         .{ "kill_self", test_kill_self },
         .{ "kill_child", test_kill_child },
+        .{ "kill_unknown_esrch", test_kill_unknown_esrch },
 
         // Runtime (passthrough, needed for libc/runtime)
         .{ "getrandom", test_getrandom },
@@ -96,7 +97,7 @@ pub fn smoke_test(_: std.Io) void {
 
 fn test_getpid() bool {
     const pid = linux.getpid();
-    return pid == 1; // virtualized init process
+    return pid > 0;
 }
 
 fn test_getppid() bool {
@@ -135,8 +136,7 @@ fn test_fork() bool {
         linux.exit_group(0);
     }
 
-    // Parent: child should have vpid 2
-    return fork_result == 2;
+    return fork_result > 1;
 }
 
 fn test_fork_child_identity() bool {
@@ -486,6 +486,13 @@ fn test_kill_child() bool {
 
     // Child should have been killed by signal
     return linux.W.IFSIGNALED(status) and linux.W.TERMSIG(status) == @intFromEnum(linux.SIG.KILL);
+}
+
+fn test_kill_unknown_esrch() bool {
+    // Killing a non-existent PID outside the sandbox should return ESRCH
+    // Use a very high PID that's unlikely to exist
+    const result = linux.kill(999999, @enumFromInt(0));
+    return linux.errno(result) == .SRCH;
 }
 
 // =============================================================================

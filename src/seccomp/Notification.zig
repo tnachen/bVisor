@@ -47,18 +47,6 @@ pub fn handle_syscall(self: Self, supervisor: *Supervisor) !Response {
     }
 }
 
-/// Await any kernel callbacks
-pub fn handle_syscall_exit(self: Self, supervisor: *Supervisor) !void {
-    switch (self.backend) {
-        .kernel => {
-            return;
-        },
-        .virtual => |syscall| {
-            return syscall.handle_exit(supervisor);
-        },
-    }
-}
-
 /// Wrapper around linux.SECCOMP.notif_resp
 pub const Response = struct {
     id: u64,

@@ -116,7 +116,7 @@ test "FdTable clone creates independent copy" {
     defer table1.unref();
 
     // Insert an FD
-    try table1.insert(5, .{ .proc = .{ .self = .{ .vpid = 42 } } });
+    try table1.insert(5, .{ .proc = .{ .self = .{ .pid = 42 } } });
 
     const table2 = try table1.clone();
     defer table2.unref();
@@ -140,7 +140,7 @@ test "FdTable insert and get" {
     const table = try Self.init(allocator);
     defer table.unref();
 
-    try table.insert(3, .{ .proc = .{ .self = .{ .vpid = 7 } } });
+    try table.insert(3, .{ .proc = .{ .self = .{ .pid = 7 } } });
 
     const fd_ptr = table.get(3);
     try testing.expect(fd_ptr != null);
@@ -156,7 +156,7 @@ test "FdTable remove" {
     const table = try Self.init(allocator);
     defer table.unref();
 
-    try table.insert(10, .{ .proc = .{ .self = .{ .vpid = 99 } } });
+    try table.insert(10, .{ .proc = .{ .self = .{ .pid = 99 } } });
     try testing.expect(table.get(10) != null);
 
     const removed = table.remove(10);
@@ -183,14 +183,14 @@ test "CLONE_FILES set - shared table, changes visible to both" {
     try testing.expectEqual(@as(usize, 2), parent_table.ref_count);
 
     // Parent opens a file
-    const vfd1 = try parent_table.open(.{ .proc = .{ .self = .{ .vpid = 1 } } });
+    const vfd1 = try parent_table.open(.{ .proc = .{ .self = .{ .pid = 1 } } });
     try testing.expectEqual(@as(VirtualFD, 3), vfd1);
 
     // Child can see it
     try testing.expect(child_table.get(vfd1) != null);
 
     // Child opens a file
-    const vfd2 = try child_table.open(.{ .proc = .{ .self = .{ .vpid = 2 } } });
+    const vfd2 = try child_table.open(.{ .proc = .{ .self = .{ .pid = 2 } } });
     try testing.expectEqual(@as(VirtualFD, 4), vfd2);
 
     // Parent can see it
@@ -208,7 +208,7 @@ test "CLONE_FILES not set - cloned table, changes independent" {
     const parent_table = try Self.init(allocator);
     defer parent_table.unref();
 
-    const vfd1 = try parent_table.open(.{ .proc = .{ .self = .{ .vpid = 1 } } });
+    const vfd1 = try parent_table.open(.{ .proc = .{ .self = .{ .pid = 1 } } });
     try testing.expectEqual(@as(VirtualFD, 3), vfd1);
 
     // Child without CLONE_FILES gets a clone
@@ -224,11 +224,11 @@ test "CLONE_FILES not set - cloned table, changes independent" {
     try testing.expect(child_table.get(vfd1) != null);
 
     // Child inherited next_vfd counter
-    const vfd2 = try child_table.open(.{ .proc = .{ .self = .{ .vpid = 2 } } });
+    const vfd2 = try child_table.open(.{ .proc = .{ .self = .{ .pid = 2 } } });
     try testing.expectEqual(@as(VirtualFD, 4), vfd2);
 
     // Parent opens another - gets same vfd since counters are independent now
-    const vfd3 = try parent_table.open(.{ .proc = .{ .self = .{ .vpid = 3 } } });
+    const vfd3 = try parent_table.open(.{ .proc = .{ .self = .{ .pid = 3 } } });
     try testing.expectEqual(@as(VirtualFD, 4), vfd3);
 
     // Child closes inherited file - parent still has it

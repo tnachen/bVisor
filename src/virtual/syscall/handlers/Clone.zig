@@ -6,8 +6,6 @@ const testing = std.testing;
 const Proc = @import("../../proc/Proc.zig");
 const Procs = @import("../../proc/Procs.zig");
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
-const deps = @import("../../../deps/deps.zig");
-const ptrace = deps.ptrace;
 
 const Self = @This();
 
@@ -23,41 +21,15 @@ pub fn parse(notif: linux.SECCOMP.notif) !Self {
     };
 }
 
-pub fn handle(self: Self, _: *Supervisor) !Result {
-    // Clone is a special case:
-    // - The syscall must execute in the kernel (supervisor can't invoke it)
-    // - We need to intercept the result to virtualize the child PID
-    // - Seccomp only intercepts BEFORE syscalls, not after
-    // - Solution: use ptrace with TRACECLONE to catch clone completion
+pub fn handle(self: Self, supervisor: *Supervisor) !Result {
+    // Store clone flags for later retrieval when child is discovered.
+    // Child will be lazily registered when it makes its first syscall
+    // (or when parent tries to interact with it).
+    try supervisor.virtual_procs.pending_clones.append(self.parent_pid, self.clone_flags);
 
-    // Attach ptrace while guest (parent) is seccomp-stopped
-    // TRACECLONE will cause the guest to stop after clone returns
-    try ptrace.seize_for_clone(self.parent_pid);
-
-    // Let the kernel execute the clone syscall
-    // We'll intercept the result in handle_exit
+    // Let the kernel execute the clone syscall.
+    // Parent will receive the real kernel PID of the child.
     return .use_kernel;
-}
-
-pub fn handle_exit(self: Self, supervisor: *Supervisor) !void {
-    // Once fully handled, detach ptrace from parent process so it can continue normally
-    defer ptrace.detach(self.parent_pid) catch {};
-
-    // Wait for PTRACE_EVENT_CLONE, then continue to syscall-exit where we can modify x0
-    const child_kernel_pid = try ptrace.wait_clone_event(self.parent_pid);
-
-    // Child process has ptrace automatically attached on it, detach so it can continue normally
-    defer ptrace.detach_child(child_kernel_pid) catch {};
-
-    // Register new child in virtual proc system
-    const child_vpid = try supervisor.virtual_procs.handle_clone(
-        self.parent_pid,
-        child_kernel_pid,
-        self.clone_flags,
-    );
-
-    // Modify return value to parent to be the virtual PID of child
-    try ptrace.set_return_value(self.parent_pid, @intCast(child_vpid));
 }
 
 test "parse extracts clone flags" {
@@ -72,7 +44,7 @@ test "parse extracts clone flags" {
     try testing.expect(parsed.clone_flags.share_files());
 }
 
-test "handle_exit registers child and modifies return value" {
+test "handle stores flags and returns use_kernel" {
     const allocator = testing.allocator;
 
     // Setup: create supervisor with initial process
@@ -80,53 +52,20 @@ test "handle_exit registers child and modifies return value" {
     var supervisor = try Supervisor.init(allocator, -1, initial_pid);
     defer supervisor.deinit();
 
-    // Configure ptrace mock to return child PID 200
-    ptrace.testing.setup_clone_result(200);
-
     // Create clone handler for guest pid 100
-    const handler = Self{
-        .parent_pid = initial_pid,
-        .clone_flags = Procs.CloneFlags.from(0), // no special flags
-    };
-
-    // Execute handle_exit
-    try handler.handle_exit(&supervisor);
-
-    // Verify child was registered
-    const child_proc = supervisor.virtual_procs.procs.get(200);
-    try testing.expect(child_proc != null);
-    try testing.expectEqual(@as(Procs.VirtualPID, 2), child_proc.?.vpid);
-
-    // Verify return value was modified to virtual PID
-    try testing.expectEqual(@as(i64, 2), ptrace.testing.test_modified_return.?);
-
-    // Verify detach was called
-    try testing.expect(ptrace.testing.test_detach_called);
-    try testing.expect(ptrace.testing.test_child_detach_called);
-}
-
-test "handle_exit with CLONE_NEWPID creates new namespace" {
-    const allocator = testing.allocator;
-
-    const initial_pid = 100;
-    var supervisor = try Supervisor.init(allocator, -1, initial_pid);
-    defer supervisor.deinit();
-
-    ptrace.testing.setup_clone_result(200);
-
     const handler = Self{
         .parent_pid = initial_pid,
         .clone_flags = Procs.CloneFlags.from(linux.CLONE.NEWPID),
     };
 
-    try handler.handle_exit(&supervisor);
+    // Execute handle
+    const result = try handler.handle(&supervisor);
 
-    // Child should be in a new namespace with vpid 1
-    const child_proc = supervisor.virtual_procs.procs.get(200);
-    try testing.expect(child_proc != null);
-    try testing.expectEqual(@as(Procs.VirtualPID, 1), child_proc.?.vpid);
-    try testing.expect(child_proc.?.is_namespace_root());
+    // Should return use_kernel
+    try testing.expect(result == .use_kernel);
 
-    // Return value should be virtual PID 1
-    try testing.expectEqual(@as(i64, 1), ptrace.testing.test_modified_return.?);
+    // Clone flags should be stored in pending_clones
+    const flags = supervisor.virtual_procs.pending_clones.remove(initial_pid);
+    try testing.expect(flags != null);
+    try testing.expect(flags.?.create_pid_namespace());
 }

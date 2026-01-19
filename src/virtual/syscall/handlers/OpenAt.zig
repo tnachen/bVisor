@@ -90,14 +90,14 @@ pub const PathRule = struct {
 pub const default_action: Action = .block;
 pub const fs_rules: []const PathRule = &.{
     // Hard blocks
-    .{ .prefix = "/sys/", .rule = .{ .terminal = .block } },
-    .{ .prefix = "/run/", .rule = .{ .terminal = .block } },
+    .{ .prefix = "/sys", .rule = .{ .terminal = .block } },
+    .{ .prefix = "/run", .rule = .{ .terminal = .block } },
 
     // Allowed (passthrough)
-    .{ .prefix = "/tmp/", .rule = .{ .terminal = .allow } },
+    .{ .prefix = "/tmp", .rule = .{ .terminal = .allow } },
 
     // Virtualized
-    .{ .prefix = "/proc/", .rule = .{ .terminal = .virtualize_proc } },
+    .{ .prefix = "/proc", .rule = .{ .terminal = .virtualize_proc } },
 };
 
 /// Resolve a path to an action, normalizing it first to handle .. components.
@@ -107,15 +107,22 @@ pub fn resolve(path_str: []const u8) !Action {
     return resolveWithRules(normalized, fs_rules, default_action);
 }
 
+/// Check if path matches a directory prefix (handles trailing slash variations)
+/// Matches: /tmp -> /tmp, /tmp/, /tmp/foo but NOT /tmpfoo
+/// Returns remainder after prefix (e.g., /tmp/foo with /tmp returns "foo"), or null if no match
+fn matchesPrefix(path_str: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path_str, prefix)) return null;
+    if (path_str.len == prefix.len) return ""; // exact match
+    if (path_str[prefix.len] == '/') return path_str[prefix.len + 1 ..]; // skip the /
+    return null; // e.g., /tmpfoo doesn't match /tmp
+}
+
 fn resolveWithRules(path_str: []const u8, rules: []const PathRule, default: Action) Action {
     for (rules) |rule| {
-        if (std.mem.startsWith(u8, path_str, rule.prefix)) {
-            const remainder = path_str[rule.prefix.len..];
+        if (matchesPrefix(path_str, rule.prefix)) |remainder| {
             switch (rule.rule) {
                 .terminal => |action| return action,
-                .branch => |branch| {
-                    return resolveWithRules(remainder, branch.children, branch.default);
-                },
+                .branch => |branch| return resolveWithRules(remainder, branch.children, branch.default),
             }
         }
     }
@@ -206,29 +213,29 @@ fn handleVirtualizeProc(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse {
+    const proc = supervisor.virtual_procs.lookup.get(self.kernel_pid) orelse {
         logger.log("openat: kernel pid {d} not found in virtual_procs", .{self.kernel_pid});
         return Result.reply_err(.NOENT);
     };
 
-    // Parse the /proc path to get target vpid
+    // Parse the /proc path to get target pid
     const path_str = self.path();
 
     var parts = std.mem.tokenizeScalar(u8, path_str, '/');
     _ = parts.next(); // skip "proc"
-    const vpid_part = parts.next() orelse return Result.reply_err(.NOENT);
+    const pid_part = parts.next() orelse return Result.reply_err(.NOENT);
 
-    // Determine target vpid
-    // Format: /proc/self/..., /proc/<vpid>/..., or global files like /proc/meminfo
-    const target_vpid: Procs.VirtualPID = if (std.mem.eql(u8, vpid_part, "self"))
-        proc.vpid
+    // Determine target pid
+    // Format: /proc/self/..., /proc/<pid>/..., or global files like /proc/meminfo
+    const target_pid: Proc.KernelPID = if (std.mem.eql(u8, pid_part, "self"))
+        proc.pid
     else
-        std.fmt.parseInt(Procs.VirtualPID, vpid_part, 10) catch
-            // Not a numeric vpid - global proc file (e.g., meminfo, cpuinfo)
-            // Use caller's vpid as placeholder
-            proc.vpid;
+        std.fmt.parseInt(Proc.KernelPID, pid_part, 10) catch
+            // Not a numeric pid - global proc file (e.g., meminfo, cpuinfo)
+            // Use caller's pid as placeholder
+            proc.pid;
 
-    const virtual_fd = FD{ .proc = .{ .self = .{ .vpid = target_vpid } } };
+    const virtual_fd = FD{ .proc = .{ .self = .{ .pid = target_pid } } };
 
     // Insert into the process's fd_table and get virtual fd number
     const vfd = try proc.fd_table.open(virtual_fd);
@@ -242,7 +249,7 @@ fn handleAllow(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse {
+    const proc = supervisor.virtual_procs.lookup.get(self.kernel_pid) orelse {
         logger.log("openat: kernel pid {d} not found in virtual_procs", .{self.kernel_pid});
         return Result.reply_err(.NOENT);
     };
@@ -440,18 +447,18 @@ test "openat virtualizes /proc/meminfo" {
     try testing.expect(!res.is_error());
 }
 
-test "openat /proc/self resolves to vpid 2 for child process" {
+test "openat /proc/self resolves to kernel pid for child process" {
     const allocator = std.testing.allocator;
     const init_pid: Proc.KernelPID = 100;
     var supervisor = try Supervisor.init(allocator, -1, init_pid);
     defer supervisor.deinit();
 
-    // Add a child process - should get vpid 2
+    // Add a child process
     const child_pid: Proc.KernelPID = 200;
-    const child_vpid = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
-    try testing.expectEqual(2, child_vpid);
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(0));
 
-    // Child opens /proc/self/status - should resolve to vpid 2
+    // Child opens /proc/self/status - should resolve to child's kernel pid
     const notif = makeNotif(.openat, .{
         .pid = child_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
@@ -545,7 +552,7 @@ test "openat O_CREAT creates file, write and read back" {
         try testing.expectEqual(@as(FdTable.VirtualFD, 3), vfd);
 
         // Get the FD and write to it
-        const proc = supervisor.virtual_procs.procs.get(child_pid).?;
+        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         const kfd = fd.kernel; // get the kernel fd
         _ = try posix.write(kfd, test_content);
@@ -570,7 +577,7 @@ test "openat O_CREAT creates file, write and read back" {
         const vfd: FdTable.VirtualFD = @intCast(res.reply.val);
 
         // Read via FD.read
-        const proc = supervisor.virtual_procs.procs.get(child_pid).?;
+        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         var buf: [64]u8 = undefined;
         const n = try fd.read(&buf);

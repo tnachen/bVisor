@@ -31,7 +31,7 @@ test "exit_group cleans up proc and returns use_kernel" {
     defer supervisor.deinit();
 
     // Verify proc exists
-    try testing.expect(supervisor.virtual_procs.procs.get(kernel_pid) != null);
+    try testing.expect(supervisor.virtual_procs.lookup.get(kernel_pid) != null);
 
     const notif = makeNotif(.exit_group, .{ .pid = kernel_pid });
     const parsed = Self.parse(notif);
@@ -41,7 +41,7 @@ test "exit_group cleans up proc and returns use_kernel" {
     try testing.expect(res == .use_kernel);
 
     // Proc should be cleaned up
-    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.procs.get(kernel_pid));
+    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.lookup.get(kernel_pid));
 }
 
 test "exit_group cleans up child process tree" {
@@ -52,12 +52,14 @@ test "exit_group cleans up child process tree" {
 
     // Create: init(100) -> child(200) -> grandchild(300)
     const child_pid: Proc.KernelPID = 200;
-    _ = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(0));
 
     const grandchild_pid: Proc.KernelPID = 300;
-    _ = try supervisor.virtual_procs.handle_clone(child_pid, grandchild_pid, Procs.CloneFlags.from(0));
+    const child = supervisor.virtual_procs.lookup.get(child_pid).?;
+    _ = try supervisor.virtual_procs.register_child(child, grandchild_pid, Procs.CloneFlags.from(0));
 
-    try testing.expectEqual(@as(usize, 3), supervisor.virtual_procs.procs.size);
+    try testing.expectEqual(@as(usize, 3), supervisor.virtual_procs.lookup.size);
 
     // Child exits - should also clean up grandchild
     const notif = makeNotif(.exit_group, .{ .pid = child_pid });
@@ -67,10 +69,10 @@ test "exit_group cleans up child process tree" {
     try testing.expect(res == .use_kernel);
 
     // Child and grandchild should be cleaned up, init should remain
-    try testing.expectEqual(@as(usize, 1), supervisor.virtual_procs.procs.size);
-    try testing.expect(supervisor.virtual_procs.procs.get(init_pid) != null);
-    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.procs.get(child_pid));
-    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.procs.get(grandchild_pid));
+    try testing.expectEqual(@as(usize, 1), supervisor.virtual_procs.lookup.size);
+    try testing.expect(supervisor.virtual_procs.lookup.get(init_pid) != null);
+    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.lookup.get(child_pid));
+    try testing.expectEqual(@as(?*Proc, null), supervisor.virtual_procs.lookup.get(grandchild_pid));
 }
 
 test "exit_group for unknown pid is no-op" {
@@ -86,5 +88,5 @@ test "exit_group for unknown pid is no-op" {
     try testing.expect(res == .use_kernel);
 
     // Original proc should still exist
-    try testing.expectEqual(@as(usize, 1), supervisor.virtual_procs.procs.size);
+    try testing.expectEqual(@as(usize, 1), supervisor.virtual_procs.lookup.size);
 }

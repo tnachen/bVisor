@@ -16,9 +16,18 @@ pub fn parse(notif: linux.SECCOMP.notif) Self {
 }
 
 pub fn handle(self: Self, supervisor: *Supervisor) !Result {
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse
+    // Use get() which does lazy registration if needed
+    const proc = supervisor.virtual_procs.get(self.kernel_pid) catch
         return Result.reply_err(.SRCH);
-    const ppid: Procs.VirtualPID = if (proc.parent) |p| p.vpid else 0;
+
+    // Return parent's kernel PID, or 0 if:
+    // - No parent (sandbox root)
+    // - Parent not visible (e.g., in CLONE_NEWPID case where parent is in different namespace)
+    const ppid: Proc.KernelPID = if (proc.parent) |p|
+        if (proc.can_see(p)) p.pid else 0
+    else
+        0;
+
     return Result.reply_success(@intCast(ppid));
 }
 
@@ -36,7 +45,7 @@ test "getppid for init process returns 0" {
     try testing.expectEqual(@as(i64, 0), res.reply.val);
 }
 
-test "getppid for child process returns parent vpid" {
+test "getppid for child process returns parent kernel pid" {
     const allocator = testing.allocator;
     const init_pid: Proc.KernelPID = 100;
     var supervisor = try Supervisor.init(allocator, -1, init_pid);
@@ -44,7 +53,8 @@ test "getppid for child process returns parent vpid" {
 
     // Add a child process
     const child_pid: Proc.KernelPID = 200;
-    _ = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(0));
 
     // Child calls getppid
     const notif = makeNotif(.getppid, .{ .pid = child_pid });
@@ -52,22 +62,24 @@ test "getppid for child process returns parent vpid" {
     const res = try parsed.handle(&supervisor);
 
     try testing.expect(!res.is_error());
-    // Parent (init) has vpid 1
-    try testing.expectEqual(@as(i64, 1), res.reply.val);
+    // Parent kernel PID
+    try testing.expectEqual(@as(i64, init_pid), res.reply.val);
 }
 
-test "getppid for grandchild returns parent vpid" {
+test "getppid for grandchild returns parent kernel pid" {
     const allocator = testing.allocator;
     const init_pid: Proc.KernelPID = 100;
     var supervisor = try Supervisor.init(allocator, -1, init_pid);
     defer supervisor.deinit();
 
-    // Create: init(1) -> child(2) -> grandchild(3)
+    // Create: init(100) -> child(200) -> grandchild(300)
     const child_pid: Proc.KernelPID = 200;
-    _ = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(0));
 
     const grandchild_pid: Proc.KernelPID = 300;
-    _ = try supervisor.virtual_procs.handle_clone(child_pid, grandchild_pid, Procs.CloneFlags.from(0));
+    const child = supervisor.virtual_procs.lookup.get(child_pid).?;
+    _ = try supervisor.virtual_procs.register_child(child, grandchild_pid, Procs.CloneFlags.from(0));
 
     // Grandchild calls getppid
     const notif = makeNotif(.getppid, .{ .pid = grandchild_pid });
@@ -75,19 +87,27 @@ test "getppid for grandchild returns parent vpid" {
     const res = try parsed.handle(&supervisor);
 
     try testing.expect(!res.is_error());
-    // Parent (child) has vpid 2
-    try testing.expectEqual(@as(i64, 2), res.reply.val);
+    // Parent (child) kernel PID
+    try testing.expectEqual(@as(i64, child_pid), res.reply.val);
 }
 
-test "getppid for unknown pid returns ESRCH" {
+test "getppid for CLONE_NEWPID child returns 0" {
     const allocator = testing.allocator;
-    var supervisor = try Supervisor.init(allocator, -1, 100);
+    const init_pid: Proc.KernelPID = 100;
+    var supervisor = try Supervisor.init(allocator, -1, init_pid);
     defer supervisor.deinit();
 
-    const notif = makeNotif(.getppid, .{ .pid = 999 });
+    // Child in new namespace
+    const child_pid: Proc.KernelPID = 200;
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(linux.CLONE.NEWPID));
+
+    // Child calls getppid - parent is not visible in child's namespace
+    const notif = makeNotif(.getppid, .{ .pid = child_pid });
     const parsed = Self.parse(notif);
     const res = try parsed.handle(&supervisor);
 
-    try testing.expect(res.is_error());
-    try testing.expectEqual(@as(i32, @intFromEnum(linux.E.SRCH)), res.reply.errno);
+    try testing.expect(!res.is_error());
+    // Parent not visible, returns 0
+    try testing.expectEqual(@as(i64, 0), res.reply.val);
 }

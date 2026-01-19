@@ -3,7 +3,6 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Namespace = @import("Namespace.zig");
 const FdTable = @import("../fs/FdTable.zig");
-const VirtualPID = Namespace.VirtualPID;
 
 pub const KernelPID = linux.pid_t;
 
@@ -15,7 +14,6 @@ const Self = @This();
 pid: KernelPID,
 namespace: *Namespace,
 fd_table: *FdTable,
-vpid: VirtualPID,
 parent: ?*Self,
 children: ProcSet = .empty,
 
@@ -29,13 +27,11 @@ pub fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_tab
         const ns_acquired = ns.ref();
         errdefer ns_acquired.unref();
 
-        const vpid = ns_acquired.next_vpid();
         const self = try allocator.create(Self);
         self.* = .{
             .pid = pid,
             .namespace = ns_acquired,
             .fd_table = fdt,
-            .vpid = vpid,
             .parent = parent,
         };
         errdefer allocator.destroy(self);
@@ -51,13 +47,11 @@ pub fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_tab
     const ns = try Namespace.init(allocator, parent_ns);
     errdefer ns.unref();
 
-    const vpid = ns.next_vpid();
     const self = try allocator.create(Self);
     self.* = .{
         .pid = pid,
         .namespace = ns,
         .fd_table = fdt,
-        .vpid = vpid,
         .parent = parent,
     };
     errdefer allocator.destroy(self);
@@ -116,19 +110,29 @@ pub fn remove_child_link(self: *Self, child: *Self) void {
     _ = self.children.remove(child);
 }
 
-/// Get a sorted list of all virtual PIDs visible in this process's namespace.
+/// Check if this process can see the target process.
+/// A process can see another if the target is registered in this process's namespace.
+/// This happens when:
+/// - They are in the same namespace, OR
+/// - The target is in a descendant namespace (descendants register in all ancestor namespaces)
+/// Note: A process in a child namespace CANNOT see processes that are only in parent namespaces.
+pub fn can_see(self: *Self, target: *Self) bool {
+    return self.namespace.contains(target);
+}
+
+/// Get a sorted list of all kernel PIDs visible in this process's namespace.
 /// Does not include processes in nested child namespaces.
-pub fn get_vpids_owned(self: *Self, allocator: Allocator) ![]VirtualPID {
+pub fn get_pids_owned(self: *Self, allocator: Allocator) ![]KernelPID {
     const root = self.get_namespace_root();
     const procs = try root.collect_namespace_procs_owned(allocator);
     defer allocator.free(procs);
 
-    var vpids = try std.ArrayList(VirtualPID).initCapacity(allocator, procs.len);
+    var pids = try std.ArrayList(KernelPID).initCapacity(allocator, procs.len);
     for (procs) |proc| {
-        try vpids.append(allocator, proc.vpid);
+        try pids.append(allocator, proc.pid);
     }
-    std.mem.sort(VirtualPID, vpids.items, {}, std.sort.asc(VirtualPID));
-    return vpids.toOwnedSlice(allocator);
+    std.mem.sort(KernelPID, pids.items, {}, std.sort.asc(KernelPID));
+    return pids.toOwnedSlice(allocator);
 }
 
 /// Collect all procs in the same namespace as self (stops at namespace boundaries).
