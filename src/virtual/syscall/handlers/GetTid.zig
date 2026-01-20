@@ -15,15 +15,15 @@ pub fn parse(notif: linux.SECCOMP.notif) Self {
     return .{ .kernel_pid = @intCast(notif.pid) };
 }
 
-/// For now, return vpid as tid. This is correct for single-threaded processes
+/// For now, return pid as tid. This is correct for single-threaded processes
 /// where tid == pid. Multi-threaded support would need per-thread tracking.
 pub fn handle(self: Self, supervisor: *Supervisor) !Result {
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse
+    const proc = supervisor.virtual_procs.get(self.kernel_pid) catch
         return Result.reply_err(.SRCH);
-    return Result.reply_success(@intCast(proc.vpid));
+    return Result.reply_success(@intCast(proc.pid));
 }
 
-test "gettid returns virtual pid for main thread" {
+test "gettid returns kernel pid for main thread" {
     const allocator = testing.allocator;
     const kernel_pid: Proc.KernelPID = 12345;
     var supervisor = try Supervisor.init(allocator, -1, kernel_pid);
@@ -34,6 +34,6 @@ test "gettid returns virtual pid for main thread" {
 
     const res = try parsed.handle(&supervisor);
     try testing.expect(!res.is_error());
-    // For main thread, tid == pid, so vpid 1
-    try testing.expectEqual(@as(i64, 1), res.reply.val);
+    // For main thread, tid == pid
+    try testing.expectEqual(@as(i64, kernel_pid), res.reply.val);
 }

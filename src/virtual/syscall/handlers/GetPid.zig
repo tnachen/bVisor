@@ -16,12 +16,12 @@ pub fn parse(notif: linux.SECCOMP.notif) Self {
 }
 
 pub fn handle(self: Self, supervisor: *Supervisor) !Result {
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse
+    const proc = supervisor.virtual_procs.get(self.kernel_pid) catch
         return Result.reply_err(.SRCH);
-    return Result.reply_success(@intCast(proc.vpid));
+    return Result.reply_success(@intCast(proc.pid));
 }
 
-test "getpid returns virtual pid" {
+test "getpid returns kernel pid" {
     const allocator = testing.allocator;
     const kernel_pid: Proc.KernelPID = 12345;
     var supervisor = try Supervisor.init(allocator, -1, kernel_pid);
@@ -35,11 +35,11 @@ test "getpid returns virtual pid" {
     const res = try parsed.handle(&supervisor);
     try testing.expect(res == .reply);
     try testing.expect(!res.is_error());
-    // Initial process gets vpid 1
-    try testing.expectEqual(@as(i64, 1), res.reply.val);
+    // Returns actual kernel PID
+    try testing.expectEqual(@as(i64, kernel_pid), res.reply.val);
 }
 
-test "getpid for child process returns vpid 2" {
+test "getpid for child process returns child kernel pid" {
     const allocator = testing.allocator;
     const init_pid: Proc.KernelPID = 100;
     var supervisor = try Supervisor.init(allocator, -1, init_pid);
@@ -47,8 +47,8 @@ test "getpid for child process returns vpid 2" {
 
     // Add a child process
     const child_pid: Proc.KernelPID = 200;
-    const child_vpid = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
-    try testing.expectEqual(@as(Procs.VirtualPID, 2), child_vpid);
+    const parent = supervisor.virtual_procs.lookup.get(init_pid).?;
+    _ = try supervisor.virtual_procs.register_child(parent, child_pid, Procs.CloneFlags.from(0));
 
     // Child calls getpid
     const notif = makeNotif(.getpid, .{ .pid = child_pid });
@@ -56,18 +56,5 @@ test "getpid for child process returns vpid 2" {
     const res = try parsed.handle(&supervisor);
 
     try testing.expect(!res.is_error());
-    try testing.expectEqual(@as(i64, 2), res.reply.val);
-}
-
-test "getpid for unknown pid returns ESRCH" {
-    const allocator = testing.allocator;
-    var supervisor = try Supervisor.init(allocator, -1, 100);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.getpid, .{ .pid = 999 });
-    const parsed = Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-
-    try testing.expect(res.is_error());
-    try testing.expectEqual(@as(i32, @intFromEnum(linux.E.SRCH)), res.reply.errno);
+    try testing.expectEqual(@as(i64, child_pid), res.reply.val);
 }

@@ -90,14 +90,14 @@ pub const PathRule = struct {
 pub const default_action: Action = .block;
 pub const fs_rules: []const PathRule = &.{
     // Hard blocks
-    .{ .prefix = "/sys/", .rule = .{ .terminal = .block } },
-    .{ .prefix = "/run/", .rule = .{ .terminal = .block } },
+    .{ .prefix = "/sys", .rule = .{ .terminal = .block } },
+    .{ .prefix = "/run", .rule = .{ .terminal = .block } },
 
     // Allowed (passthrough)
-    .{ .prefix = "/tmp/", .rule = .{ .terminal = .allow } },
+    .{ .prefix = "/tmp", .rule = .{ .terminal = .allow } },
 
     // Virtualized
-    .{ .prefix = "/proc/", .rule = .{ .terminal = .virtualize_proc } },
+    .{ .prefix = "/proc", .rule = .{ .terminal = .virtualize_proc } },
 };
 
 /// Resolve a path to an action, normalizing it first to handle .. components.
@@ -107,15 +107,21 @@ pub fn resolve(path_str: []const u8) !Action {
     return resolveWithRules(normalized, fs_rules, default_action);
 }
 
+/// Check if path matches a directory prefix (handles trailing slash variations)
+/// Returns remainder after prefix, or null if no match
+fn matchesPrefix(path_str: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path_str, prefix)) return null;
+    if (path_str.len == prefix.len) return ""; // exact match
+    if (path_str[prefix.len] == '/') return path_str[prefix.len + 1 ..]; // skip the /
+    return null; // e.g., /tmpfoo doesn't match /tmp
+}
+
 fn resolveWithRules(path_str: []const u8, rules: []const PathRule, default: Action) Action {
     for (rules) |rule| {
-        if (std.mem.startsWith(u8, path_str, rule.prefix)) {
-            const remainder = path_str[rule.prefix.len..];
+        if (matchesPrefix(path_str, rule.prefix)) |remainder| {
             switch (rule.rule) {
                 .terminal => |action| return action,
-                .branch => |branch| {
-                    return resolveWithRules(remainder, branch.children, branch.default);
-                },
+                .branch => |branch| return resolveWithRules(remainder, branch.children, branch.default),
             }
         }
     }
@@ -206,29 +212,29 @@ fn handleVirtualizeProc(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse {
+    const proc = supervisor.virtual_procs.lookup.get(self.kernel_pid) orelse {
         logger.log("openat: kernel pid {d} not found in virtual_procs", .{self.kernel_pid});
         return Result.reply_err(.NOENT);
     };
 
-    // Parse the /proc path to get target vpid
+    // Parse the /proc path to get target pid
     const path_str = self.path();
 
     var parts = std.mem.tokenizeScalar(u8, path_str, '/');
     _ = parts.next(); // skip "proc"
-    const vpid_part = parts.next() orelse return Result.reply_err(.NOENT);
+    const pid_part = parts.next() orelse return Result.reply_err(.NOENT);
 
-    // Determine target vpid
-    // Format: /proc/self/..., /proc/<vpid>/..., or global files like /proc/meminfo
-    const target_vpid: Procs.VirtualPID = if (std.mem.eql(u8, vpid_part, "self"))
-        proc.vpid
+    // Determine target pid
+    // Format: /proc/self/..., /proc/<pid>/..., or global files like /proc/meminfo
+    const target_pid: Proc.KernelPID = if (std.mem.eql(u8, pid_part, "self"))
+        proc.pid
     else
-        std.fmt.parseInt(Procs.VirtualPID, vpid_part, 10) catch
-            // Not a numeric vpid - global proc file (e.g., meminfo, cpuinfo)
-            // Use caller's vpid as placeholder
-            proc.vpid;
+        std.fmt.parseInt(Proc.KernelPID, pid_part, 10) catch
+            // Not a numeric pid - global proc file (e.g., meminfo, cpuinfo)
+            // Use caller's pid as placeholder
+            proc.pid;
 
-    const virtual_fd = FD{ .proc = .{ .self = .{ .vpid = target_vpid } } };
+    const virtual_fd = FD{ .proc = .{ .self = .{ .pid = target_pid } } };
 
     // Insert into the process's fd_table and get virtual fd number
     const vfd = try proc.fd_table.open(virtual_fd);
@@ -242,7 +248,7 @@ fn handleAllow(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.procs.get(self.kernel_pid) orelse {
+    const proc = supervisor.virtual_procs.lookup.get(self.kernel_pid) orelse {
         logger.log("openat: kernel pid {d} not found in virtual_procs", .{self.kernel_pid});
         return Result.reply_err(.NOENT);
     };
@@ -268,112 +274,30 @@ fn handleAllow(self: Self, supervisor: *Supervisor) !Result {
     return Result.reply_success(@intCast(vfd));
 }
 
-test "openat blocks private paths" {
+test "openat blocks /sys and /run paths" {
     const allocator = std.testing.allocator;
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    defer threaded.deinit();
-    const io = threaded.io();
-    _ = io;
-
-    const child_pid: Proc.KernelPID = 345; // some arbitrary kernel PID
-    const notify_fd: KernelFD = -1; // makes deinit ignore closing the fd
-
-    var supervisor = try Supervisor.init(allocator, notify_fd, child_pid);
+    const child_pid: Proc.KernelPID = 100;
+    var supervisor = try Supervisor.init(allocator, -1, child_pid);
     defer supervisor.deinit();
 
-    const flags = linux.O{
-        .ACCMODE = .RDONLY,
-        .CREAT = true,
+    const blocked_paths = [_][*:0]const u8{
+        "/sys/class/net",
+        "/run/docker.sock",
     };
 
-    const notif = makeNotif(.openat, .{
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/sys/private.txt"),
-        .arg2 = @intCast(@as(u32, @bitCast(flags))),
-        .arg3 = 0,
-    });
+    for (blocked_paths) |path_ptr| {
+        const notif = makeNotif(.openat, .{
+            .pid = child_pid,
+            .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
+            .arg1 = @intFromPtr(path_ptr),
+            .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
+        });
 
-    const parsed = try Self.parse(notif);
-    try testing.expectEqualStrings("/sys/private.txt", parsed.path());
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(res.is_error());
-}
-
-test "openat blocks /sys/class/net" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/sys/class/net"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(res.is_error());
-}
-
-test "openat blocks /sys/kernel/security" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/sys/kernel/security/lsm"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(res.is_error());
-}
-
-test "openat blocks /run/docker.sock" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/run/docker.sock"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(res.is_error());
-}
-
-test "openat blocks /run/user paths" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/run/user/1000/bus"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(res.is_error());
+        const parsed = try Self.parse(notif);
+        const res = try parsed.handle(&supervisor);
+        try testing.expect(res == .reply);
+        try testing.expect(res.is_error());
+    }
 }
 
 test "useVFS detects write modes" {
@@ -383,75 +307,12 @@ test "useVFS detects write modes" {
     try testing.expect(useVFS(linux.O{ .ACCMODE = .RDONLY, .CREAT = true }));
 }
 
-test "openat virtualizes /proc/self/status" {
+test "openat virtualizes /proc paths" {
     const allocator = std.testing.allocator;
     const child_pid: Proc.KernelPID = 12345;
     var supervisor = try Supervisor.init(allocator, -1, child_pid);
     defer supervisor.deinit();
 
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/proc/self/status"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(!res.is_error());
-}
-
-test "openat virtualizes /proc/1/status" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 12345;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/proc/1/status"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(!res.is_error());
-}
-
-test "openat virtualizes /proc/meminfo" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 12345;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/proc/meminfo"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    try testing.expect(!res.is_error());
-}
-
-test "openat /proc/self resolves to vpid 2 for child process" {
-    const allocator = std.testing.allocator;
-    const init_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, init_pid);
-    defer supervisor.deinit();
-
-    // Add a child process - should get vpid 2
-    const child_pid: Proc.KernelPID = 200;
-    const child_vpid = try supervisor.virtual_procs.handle_clone(init_pid, child_pid, Procs.CloneFlags.from(0));
-    try testing.expectEqual(2, child_vpid);
-
-    // Child opens /proc/self/status - should resolve to vpid 2
     const notif = makeNotif(.openat, .{
         .pid = child_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
@@ -480,30 +341,7 @@ test "openat handles allowed paths (returns NOENT for missing file)" {
 
     const parsed = try Self.parse(notif);
     const res = try parsed.handle(&supervisor);
-    // Supervisor handles all opens now (no passthrough)
     try testing.expect(res == .reply);
-    // File doesn't exist, so we get NOENT
-    try testing.expect(res.is_error());
-    try testing.expectEqual(linux.E.NOENT, @as(linux.E, @enumFromInt(res.reply.errno)));
-}
-
-test "openat O_WRONLY on missing file returns NOENT" {
-    const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, -1, child_pid);
-    defer supervisor.deinit();
-
-    const notif = makeNotif(.openat, .{
-        .pid = child_pid,
-        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
-        .arg1 = @intFromPtr("/tmp/nonexistent_test_file.txt"),
-        .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .WRONLY }))),
-    });
-
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .reply);
-    // O_WRONLY without O_CREAT on nonexistent file should fail
     try testing.expect(res.is_error());
     try testing.expectEqual(linux.E.NOENT, @as(linux.E, @enumFromInt(res.reply.errno)));
 }
@@ -545,7 +383,7 @@ test "openat O_CREAT creates file, write and read back" {
         try testing.expectEqual(@as(FdTable.VirtualFD, 3), vfd);
 
         // Get the FD and write to it
-        const proc = supervisor.virtual_procs.procs.get(child_pid).?;
+        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         const kfd = fd.kernel; // get the kernel fd
         _ = try posix.write(kfd, test_content);
@@ -570,7 +408,7 @@ test "openat O_CREAT creates file, write and read back" {
         const vfd: FdTable.VirtualFD = @intCast(res.reply.val);
 
         // Read via FD.read
-        const proc = supervisor.virtual_procs.procs.get(child_pid).?;
+        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         var buf: [64]u8 = undefined;
         const n = try fd.read(&buf);

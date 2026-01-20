@@ -144,14 +144,6 @@ pub const Syscall = union(enum) {
         };
     }
 
-    pub fn handle_exit(self: Self, supervisor: *Supervisor) !void {
-        // only needed for clone
-        if (self == .clone) {
-            return self.clone.handle_exit(supervisor);
-        }
-        return;
-    }
-
     pub const Result = union(enum) {
         use_kernel: void,
         reply: Reply,

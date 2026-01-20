@@ -48,10 +48,6 @@ pub fn run(self: *Self) !void {
 
         // Reply to kernel
         try self.send(response.to_notif_resp());
-
-        // Await kernel callbacks if any
-        // For example, clone uses ptrace to capture a single syscall's output
-        try notification.handle_syscall_exit(self);
     }
 }
 

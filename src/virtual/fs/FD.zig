@@ -2,30 +2,30 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../types.zig");
-const Namespace = @import("../proc/Namespace.zig");
+const Proc = @import("../proc/Proc.zig");
 
-const VirtualPID = Namespace.VirtualPID;
+const KernelPID = Proc.KernelPID;
 
 /// Virtual file descriptor - represents a virtualized file.
 /// This is a tagged union representing different types of virtual files.
 pub const FD = union(enum) {
     kernel: types.KernelFD, // supervisor maintains virtual FDs for every fd, for consistency
-    proc: Proc, // virtualized proc file
+    proc: ProcFD, // virtualized proc file
     cow: Cow, // copy-on-write file, created only if user requests more than read perms
 
     const Self = @This();
 
-    pub const Proc = union(enum) {
+    pub const ProcFD = union(enum) {
         self: struct {
-            vpid: VirtualPID,
+            pid: KernelPID,
             offset: usize = 0,
         },
 
-        pub fn read(self: *Proc, buf: []u8) usize {
+        pub fn read(self: *ProcFD, buf: []u8) usize {
             switch (self.*) {
                 .self => |*s| {
                     var tmp: [16]u8 = undefined;
-                    const content = std.fmt.bufPrint(&tmp, "{d}\n", .{s.vpid}) catch unreachable;
+                    const content = std.fmt.bufPrint(&tmp, "{d}\n", .{s.pid}) catch unreachable;
                     const remaining = content[s.offset..];
                     const n = @min(buf.len, remaining.len);
                     @memcpy(buf[0..n], remaining[0..n]);
@@ -60,15 +60,15 @@ pub const FD = union(enum) {
 
 const testing = std.testing;
 
-test "FD.Proc.self read returns vpid" {
-    var proc_fd: FD.Proc = .{ .self = .{ .vpid = 42 } };
+test "FD.ProcFD.self read returns pid" {
+    var proc_fd: FD.ProcFD = .{ .self = .{ .pid = 42 } };
     var buf: [16]u8 = undefined;
     const n = proc_fd.read(&buf);
     try testing.expectEqualStrings("42\n", buf[0..n]);
 }
 
-test "FD.Proc.self read tracks offset" {
-    var proc_fd: FD.Proc = .{ .self = .{ .vpid = 123 } };
+test "FD.ProcFD.self read tracks offset" {
+    var proc_fd: FD.ProcFD = .{ .self = .{ .pid = 123 } };
     var buf: [2]u8 = undefined;
 
     const n1 = proc_fd.read(&buf);
@@ -84,7 +84,7 @@ test "FD.Proc.self read tracks offset" {
 }
 
 test "FD union read dispatches to proc" {
-    var fd: FD = .{ .proc = .{ .self = .{ .vpid = 7 } } };
+    var fd: FD = .{ .proc = .{ .self = .{ .pid = 7 } } };
     var buf: [16]u8 = undefined;
     const n = try fd.read(&buf);
     try testing.expectEqualStrings("7\n", buf[0..n]);

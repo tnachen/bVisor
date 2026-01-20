@@ -3,20 +3,17 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Proc = @import("Proc.zig");
 
-pub const VirtualPID = linux.pid_t;
-
-const VpidLookup = std.AutoHashMapUnmanaged(VirtualPID, *Proc);
+const ProcSet = std.AutoHashMapUnmanaged(*Proc, void);
 
 const Self = @This();
 
 /// Namespaces are refcounted and shared between procs.
-/// Each namespace tracks all procs visible to it (own procs + procs in child namespaces).
-
+/// Used for visibility filtering - processes can only see other processes
+/// in the same namespace or descendent namespaces.
 ref_count: usize,
 allocator: Allocator,
-vpid_counter: VirtualPID = 0,
 parent: ?*Self,
-procs: VpidLookup = .empty,
+procs: ProcSet = .empty,
 
 pub fn init(allocator: Allocator, parent: ?*Self) !*Self {
     const self = try allocator.create(Self);
@@ -42,49 +39,33 @@ pub fn unref(self: *Self) void {
     }
 }
 
-pub fn next_vpid(self: *Self) VirtualPID {
-    self.vpid_counter += 1;
-    return self.vpid_counter;
-}
-
-/// Get a proc by its vpid as visible from this namespace
-pub fn get_proc(self: *Self, vpid: VirtualPID) ?*Proc {
-    return self.procs.get(vpid);
-}
-
 /// Register a proc in this namespace and all ancestor namespaces.
-/// Each namespace assigns its own vpid to the proc.
 pub fn register_proc(self: *Self, allocator: Allocator, proc: *Proc) !void {
-    // Register in this namespace (proc already has vpid assigned from this ns)
-    try self.procs.put(allocator, proc.vpid, proc);
+    try self.procs.put(allocator, proc, {});
 
-    // Register in all ancestor namespaces with their own vpids
+    // Register in all ancestor namespaces for visibility
     var ancestor = self.parent;
     while (ancestor) |ns| {
-        const ancestor_vpid = ns.next_vpid();
-        try ns.procs.put(allocator, ancestor_vpid, proc);
+        try ns.procs.put(allocator, proc, {});
         ancestor = ns.parent;
     }
 }
 
 /// Unregister a proc from this namespace and all ancestor namespaces.
-/// Searches by proc pointer since we don't store vpid-per-namespace in Proc.
 pub fn unregister_proc(self: *Self, proc: *Proc) void {
-    // Remove from this namespace
-    _ = self.procs.remove(proc.vpid);
+    _ = self.procs.remove(proc);
 
-    // Remove from all ancestor namespaces (search by pointer)
+    // Remove from all ancestor namespaces
     var ancestor = self.parent;
     while (ancestor) |ns| {
-        var iter = ns.procs.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.* == proc) {
-                _ = ns.procs.remove(entry.key_ptr.*);
-                break;
-            }
-        }
+        _ = ns.procs.remove(proc);
         ancestor = ns.parent;
     }
+}
+
+/// Check if a proc is visible in this namespace.
+pub fn contains(self: *Self, proc: *Proc) bool {
+    return self.procs.contains(proc);
 }
 
 const testing = std.testing;
