@@ -68,7 +68,7 @@ fn get_ns_inode(pid: KernelPID, ns_type: []const u8) ?u64 {
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/ns/{s}", .{ pid, ns_type }) catch return null;
 
     var stat_buf: linux.Statx = undefined;
-    _ = LinuxResult(u0).from(linux.statx(
+    LinuxResult(void).from(linux.statx(
         linux.AT.FDCWD,
         @ptrCast(path.ptr),
         0,
@@ -82,16 +82,12 @@ fn get_ns_inode(pid: KernelPID, ns_type: []const u8) ?u64 {
 /// Check if two processes share the same fd table using kcmp
 fn shares_fd_table(pid1: KernelPID, pid2: KernelPID) bool {
     // kcmp returns 0 if resources are equal, positive if different, negative on error
-    const result = LinuxResult(u0).from(linux.syscall5(
+    return LinuxResult(bool).from(linux.syscall5(
         .kcmp,
         @intCast(pid1),
         @intCast(pid2),
         KCMP_FILES,
         0,
         0,
-    ));
-    return switch (result) {
-        .Ok => true, // 0 means equal
-        .Error => false, // error or non-zero means not equal
-    };
+    )).unwrap() catch false;
 }

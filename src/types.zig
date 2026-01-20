@@ -13,10 +13,17 @@ pub fn LinuxResult(comptime T: type) type {
         const Self = @This();
 
         pub fn from(result: usize) Self {
-            return switch (linux.errno(result)) {
-                .SUCCESS => Self{ .Ok = @intCast(result) },
-                else => Self{ .Error = linux.errno(result) },
+            const err = linux.errno(result);
+            if (err != .SUCCESS) {
+                return Self{ .Error = err };
+            }
+            // Type-specific success value handling
+            const ok_value: T = switch (@typeInfo(T)) {
+                .bool => true,
+                .void => {},
+                else => @intCast(result),
             };
+            return Self{ .Ok = ok_value };
         }
 
         /// Returns inner value, or throws a general error
@@ -24,7 +31,7 @@ pub fn LinuxResult(comptime T: type) type {
         pub fn unwrap(self: Self) !T {
             return switch (self) {
                 .Ok => |value| value,
-                .Error => |_| error.SyscallFailed, // Some general error
+                .Error => |_| error.SyscallFailed,
             };
         }
     };
