@@ -195,19 +195,13 @@ pub fn open(self: *const Self, virtual_path: []const u8, flags: linux.O, mode: l
         // Copy original to COW
         var copy_buf: [4096]u8 = undefined;
         while (true) {
-            const n = posix.read(orig_fd, &copy_buf) catch |err| {
-                posix.close(cow_fd);
-                return err;
-            };
+            const n = try posix.read(orig_fd, &copy_buf);
             if (n == 0) break;
 
             // Handle partial writes
             var written: usize = 0;
             while (written < n) {
-                written += posix.write(cow_fd, copy_buf[written..n]) catch |err| {
-                    posix.close(cow_fd);
-                    return err;
-                };
+                written += try posix.write(cow_fd, copy_buf[written..n]);
             }
         }
 
