@@ -14,7 +14,7 @@ Other than the overhead of syscall emulation, child processes run natively.
 
 ### Goal
 
-The goal of bVisor is to allow higher-level languages to spawn ephemeral local sandboxes, to allow local execution of bash commands.
+bVisor is ~complete once it can embed into higher-level languages, such as python or typescript, as an alternative "bash" subprocess runner.
 
 For example, embedded into a python SDK:
 ```python
