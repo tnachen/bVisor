@@ -231,6 +231,15 @@ fn handleVirtualizeProc(self: Self, supervisor: *Supervisor) !Result {
             // Use caller's pid as placeholder
             proc.pid;
 
+    // Ensure visibility - look up target proc and check if caller can see it
+    const target_proc = supervisor.virtual_procs.lookup.get(target_pid) orelse {
+        // Target not in sandbox (or not yet registered)
+        return Result.reply_err(.NOENT);
+    };
+    if (!proc.can_see(target_proc)) {
+        return Result.reply_err(.NOENT);
+    }
+
     const virtual_fd = FD{ .proc = .{ .self = .{ .pid = target_pid } } };
 
     // Insert into the process's fd_table and get virtual fd number

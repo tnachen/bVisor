@@ -13,11 +13,11 @@ const KCMP_FILES: u5 = 2;
 
 /// Read parent PID from /proc/[pid]/status
 pub fn read_ppid(pid: KernelPID) !KernelPID {
-    var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid}) catch unreachable;
+    var path_buf: [32:0]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/status", .{pid}) catch unreachable;
 
     const fd = try LinuxResult(KernelFD).from(
-        linux.open(@ptrCast(path.ptr), .{ .ACCMODE = .RDONLY }, 0),
+        linux.open(path.ptr, .{ .ACCMODE = .RDONLY }, 0),
     ).unwrap();
     defer _ = linux.close(fd);
 
@@ -63,13 +63,13 @@ fn same_pid_namespace(pid1: KernelPID, pid2: KernelPID) bool {
 
 /// Get namespace inode for a process
 fn get_ns_inode(pid: KernelPID, ns_type: []const u8) ?u64 {
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/ns/{s}", .{ pid, ns_type }) catch return null;
+    var path_buf: [64:0]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/ns/{s}", .{ pid, ns_type }) catch return null;
 
     var stat_buf: linux.Statx = undefined;
     LinuxResult(void).from(linux.statx(
         linux.AT.FDCWD,
-        @ptrCast(path.ptr),
+        path.ptr,
         0,
         @bitCast(linux.STATX{ .INO = true }),
         &stat_buf,

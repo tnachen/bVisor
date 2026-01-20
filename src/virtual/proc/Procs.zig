@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
@@ -89,7 +88,7 @@ pub fn get(self: *Self, pid: KernelPID) !*Proc {
     defer lineage.deinit(self.allocator);
 
     var child_pid = pid;
-    var nearest_ancestor: ?*Proc = null;
+    var nearest_registered_proc: ?*Proc = null;
     while (true) {
         try lineage.append(self.allocator, child_pid);
 
@@ -99,7 +98,7 @@ pub fn get(self: *Self, pid: KernelPID) !*Proc {
         // check if parent in our tree
         if (self.lookup.get(ppid)) |parent_proc| {
             // no need to walk higher
-            nearest_ancestor = parent_proc;
+            nearest_registered_proc = parent_proc;
             break;
         }
 
@@ -108,11 +107,11 @@ pub fn get(self: *Self, pid: KernelPID) !*Proc {
         child_pid = ppid;
     }
 
-    if (nearest_ancestor == null) unreachable;
+    if (nearest_registered_proc == null) unreachable;
 
     // if no error, lineage is fully in sandbox
     // register any unknown procs in reverse order
-    var current_parent = nearest_ancestor.?;
+    var current_parent = nearest_registered_proc.?;
     var i = lineage.items.len;
     while (i > 0) : (i -= 1) {
         child_pid = lineage.items[i - 1];
