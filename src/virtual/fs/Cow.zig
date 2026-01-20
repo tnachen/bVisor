@@ -45,14 +45,14 @@ fn relPath(path: []const u8) []const u8 {
 }
 
 pub fn exists(self: *const Self, io: Io, virtual_path: []const u8) bool {
-    const suffix = relPath(virtual_path);
-    self.root_dir.access(io, suffix, .{}) catch return false;
+    const rel_path = relPath(virtual_path);
+    self.root_dir.access(io, rel_path, .{}) catch return false;
     return true;
 }
 
 /// Opens COW file, copying from original on first write.
 pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O, mode: linux.mode_t) !KernelFD {
-    const suffix = relPath(virtual_path);
+    const rel_path = relPath(virtual_path);
 
     var posix_flags: posix.O = .{};
     posix_flags.ACCMODE = switch (flags.ACCMODE) {
@@ -67,14 +67,14 @@ pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O,
     if (flags.NONBLOCK) posix_flags.NONBLOCK = true;
     if (flags.CLOEXEC) posix_flags.CLOEXEC = true;
 
-    if (posix.openat(self.root_dir.handle, suffix, posix_flags, @truncate(mode))) |fd| {
+    if (posix.openat(self.root_dir.handle, rel_path, posix_flags, @truncate(mode))) |fd| {
         return fd;
     } else |err| {
         if (err != error.FileNotFound) return err;
     }
 
     // COW file doesn't exist - create parent dirs and copy original if it exists
-    if (std.fs.path.dirnamePosix(suffix)) |parent| {
+    if (std.fs.path.dirnamePosix(rel_path)) |parent| {
         try self.root_dir.createDirPath(io, parent);
     }
 
@@ -87,7 +87,7 @@ pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O,
     if (posix.openat(linux.AT.FDCWD, vpath_z, .{ .ACCMODE = .RDONLY }, 0)) |orig_fd| {
         defer posix.close(orig_fd);
 
-        const cow_fd = try posix.openat(self.root_dir.handle, suffix, .{
+        const cow_fd = try posix.openat(self.root_dir.handle, rel_path, .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
             .EXCL = true,
@@ -107,11 +107,11 @@ pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O,
         posix.close(cow_fd);
         var reopen_flags = posix_flags;
         reopen_flags.CREAT = true;
-        return posix.openat(self.root_dir.handle, suffix, reopen_flags, @truncate(mode));
+        return posix.openat(self.root_dir.handle, rel_path, reopen_flags, @truncate(mode));
     } else |_| {
         var create_flags = posix_flags;
         create_flags.CREAT = true;
-        return posix.openat(self.root_dir.handle, suffix, create_flags, @truncate(mode));
+        return posix.openat(self.root_dir.handle, rel_path, create_flags, @truncate(mode));
     }
 }
 

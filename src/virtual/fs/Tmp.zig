@@ -38,7 +38,7 @@ fn relPath(tmp_path: []const u8) ![]const u8 {
 }
 
 pub fn open(self: *const Self, io: Io, tmp_path: []const u8, flags: linux.O, mode: linux.mode_t) !KernelFD {
-    const suffix = try relPath(tmp_path);
+    const rel_path = try relPath(tmp_path);
 
     var posix_flags: posix.O = .{};
     posix_flags.ACCMODE = switch (flags.ACCMODE) {
@@ -54,14 +54,14 @@ pub fn open(self: *const Self, io: Io, tmp_path: []const u8, flags: linux.O, mod
     if (flags.CLOEXEC) posix_flags.CLOEXEC = true;
     if (flags.DIRECTORY) posix_flags.DIRECTORY = true;
 
-    if (posix.openat(self.root_dir.handle, suffix, posix_flags, @truncate(mode))) |fd| {
+    if (posix.openat(self.root_dir.handle, rel_path, posix_flags, @truncate(mode))) |fd| {
         return fd;
     } else |err| {
         if (err == error.FileNotFound and flags.CREAT) {
-            if (std.fs.path.dirnamePosix(suffix)) |parent| {
+            if (std.fs.path.dirnamePosix(rel_path)) |parent| {
                 try self.root_dir.createDirPath(io, parent);
             }
-            return posix.openat(self.root_dir.handle, suffix, posix_flags, @truncate(mode));
+            return posix.openat(self.root_dir.handle, rel_path, posix_flags, @truncate(mode));
         }
         return err;
     }
