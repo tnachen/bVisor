@@ -31,6 +31,11 @@ pub fn handle(self: Self, supervisor: *Supervisor) !Result {
     const caller = supervisor.virtual_procs.get(self.kernel_pid) catch
         return Result.replyErr(.SRCH);
 
+    // TODO ERIK get target via namespace reference frame, not from virtual_procs
+    // also rename virtual_procs to "kernel_procs" and make the type of target_pid and args to namespace procs be virtualPID
+    // caller.namespace.procs.get(self.target_pid) catch
+    // const target: *Proc = caller.namespace.procs.get(self.target_pid)
+
     const target = supervisor.virtual_procs.get(self.target_pid) catch
         return Result.replyErr(.SRCH);
 

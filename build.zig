@@ -2,58 +2,66 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
-    const target = b.resolveTargetQuery(.{
+
+    // Target multiple platforms based on testing flags
+    const linux_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64, // ARM64 for Apple Silicon Macs running Docker, update for other targets
         .os_tag = .linux,
         .abi = .musl,
     });
+    const host_target = b.graph.host;
 
-    const exe = b.addExecutable(.{
+    // Build and install linux executable
+    // to ./zig-out/bin
+    const linux_exe = b.addExecutable(.{
         .name = "bVisor",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = target,
+            .target = linux_target,
             .optimize = optimize,
         }),
     });
+    b.installArtifact(linux_exe);
 
-    b.installArtifact(exe);
-
-    const run_step = b.step("run", "Run e2e smoke tests in a Linux container");
-    var docker_args = std.ArrayList([]const u8).empty;
-    defer docker_args.deinit(b.allocator);
-    docker_args.append(b.allocator, "docker") catch @panic("OOM");
-    docker_args.append(b.allocator, "run") catch @panic("OOM");
-    docker_args.append(b.allocator, "--rm") catch @panic("OOM");
-    docker_args.append(b.allocator, "-v") catch @panic("OOM");
-    docker_args.append(b.allocator, "./zig-out:/zig-out") catch @panic("OOM");
-    docker_args.append(b.allocator, "alpine") catch @panic("OOM");
-    docker_args.append(b.allocator, "/zig-out/bin/bVisor") catch @panic("OOM");
-    if (b.args) |args| {
-        docker_args.appendSlice(b.allocator, args) catch @panic("OOM");
-    }
-
-    const run_cmd = b.addSystemCommand(docker_args.items);
-    run_cmd.step.dependOn(b.getInstallStep());
-    run_step.dependOn(&run_cmd.step);
-
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    // Tests run on host (not cross-compiled)
-    const exe_tests = b.addTest(.{
+    // Build and install zig tests for running on host
+    const host_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.graph.host,
+            .target = host_target,
             .optimize = optimize,
         }),
     });
+    b.installArtifact(host_tests);
 
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    // Build and install zig tests for linux running in docker
+    const linux_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = linux_target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(linux_tests);
 
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_exe_tests.step);
+    // Add CLI commands for build.zig
+
+    // 'run' mounts built linux exe into a linux container and runs it there
+    const cli_step = b.step("run", "Run executable in a Linux container");
+    const runner_args = [_][]const u8{ "docker", "run", "--rm", "-v", "./zig-out:/zig-out", "alpine", "/zig-out/bin/bVisor" };
+    const runner = b.addSystemCommand(&runner_args);
+    var runner_step = runner.step;
+    runner_step.dependOn(b.getInstallStep()); // docker run command depends on linux exe having been built
+    cli_step.dependOn(&runner_step); // ensure run command
+
+    // Build unit tests for host target
+    const host_test_step = b.step("test", "Run unit tests on host");
+    const host_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = host_target,
+            .optimize = optimize,
+        }),
+    });
+    const host_test_run = b.addRunArtifact(host_unit_tests);
+    host_test_step.dependOn(&host_test_run.step);
 }

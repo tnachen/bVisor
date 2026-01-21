@@ -24,7 +24,7 @@ pub fn setupAndRun(runnable: *const fn (io: std.Io) void) !void {
     if (fork_result == 0) {
         // Child process
         posix.close(supervisor_sock);
-        try childProcess(child_sock, runnable);
+        try childProcess(child_sock, runnable); // ERIK TODO: rename to initialGuestProcess
     } else {
         // Supervisor process
         posix.close(child_sock);

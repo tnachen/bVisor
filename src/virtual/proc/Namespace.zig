@@ -3,7 +3,7 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Proc = @import("Proc.zig");
 
-const ProcSet = std.AutoHashMapUnmanaged(*Proc, void);
+const ProcSet = std.AutoHashMapUnmanaged(*Proc, void); // ERIK TODO: make map of guestPID to *Proc, then in proc store SupervisorPID so we can deref from guest PID to supervisor PID via callers' namespace lookup guestPID, get Proc, proc.superviser_pid
 
 const Self = @This();
 

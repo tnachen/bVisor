@@ -16,7 +16,7 @@ const Self = @This();
 
 allocator: Allocator,
 io: Io,
-init_child_pid: linux.pid_t,
+init_child_pid: linux.pid_t, // ERIK TODO: stop using child naming here, use guest
 notify_fd: KernelFD,
 logger: Logger,
 
@@ -31,7 +31,7 @@ tmp: Tmp,
 
 pub fn init(allocator: Allocator, io: Io, notify_fd: KernelFD, child_pid: linux.pid_t) !Self {
     const logger = Logger.init(.supervisor);
-    var virtual_procs = Procs.init(allocator);
+    var virtual_procs = Procs.init(allocator); // ERIK TODO: rename to guest_procs
     errdefer virtual_procs.deinit();
     _ = try virtual_procs.handleInitialProcess(child_pid);
 
