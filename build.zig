@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
+    const use_docker = b.option(bool, "use-docker", "Run tests in Docker container") orelse false;
 
     // Target multiple platforms based on testing flags
     const linux_target = b.resolveTargetQuery(.{
@@ -50,15 +51,15 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep()); // docker run depends on linux exe being built
     run_cli_step.dependOn(&run_cmd.step);
 
-    // 'test' runs unit tests on host
-    const test_cli_step = b.step("test", "Run unit tests on host");
-    const test_cmd = b.addRunArtifact(host_tests);
-    test_cli_step.dependOn(&test_cmd.step);
-
-    // 'test-linux' runs unit tests in linux container
-    const test_linux_cli_step = b.step("test-linux", "Run unit tests in linux container");
-    const test_linux_args = [_][]const u8{ "docker", "run", "--rm", "-v", "./zig-out:/zig-out", "alpine", "/zig-out/bin/bVisor-test" };
-    const test_linux_cmd = b.addSystemCommand(&test_linux_args);
-    test_linux_cmd.step.dependOn(b.getInstallStep()); // docker run depends on linux tests being built
-    test_linux_cli_step.dependOn(&test_linux_cmd.step);
+    // 'test' runs unit tests (use -Duse-docker to run in container)
+    const test_cli_step = b.step("test", "Run unit tests (-Duse-docker for Linux container)");
+    if (use_docker) {
+        const docker_args = [_][]const u8{ "docker", "run", "--rm", "-v", "./zig-out:/zig-out", "alpine", "/zig-out/bin/tests" };
+        const docker_cmd = b.addSystemCommand(&docker_args);
+        docker_cmd.step.dependOn(b.getInstallStep());
+        test_cli_step.dependOn(&docker_cmd.step);
+    } else {
+        const run_tests = b.addRunArtifact(host_tests);
+        test_cli_step.dependOn(&run_tests.step);
+    }
 }

@@ -126,11 +126,10 @@ bVisor depends on Linux kernel features, though it's developed primarily on Arm 
 There are three ways to test:
 
 **Native unit tests**
-- `zig build test` runs unit tests **on your mac**. It's intended for quick correctness checks for anything behind the seccomp notification layer (syscall handlers, namespace isolation, virtual filesystem, etc). Prefer to use posix apis over linus where possible, to allow more tests to natively run on mac. If posix apis are not available, we can do comptime dependency injection (see `src/deps`) to use mac-compatible mocks when running on mac.
+- `zig build test` runs unit tests **on your mac**. It's intended for quick correctness checks for anything behind the seccomp notification layer (syscall handlers, namespace isolation, virtual filesystem, etc). Prefer to use posix apis over linux where possible, to allow more tests to natively run on mac. If posix apis are not available, we can do comptime dependency injection (see `src/deps`) to use mac-compatible mocks when running on mac.
 
 **Containerized unit tests**
-(WIP: not implemented yet)
-- `zig build test --use-docker` runs the same tests as `zig build test` but in a linux container. This exercises the linux deps in `src/deps`.
+- `zig build test -Duse-docker` runs the same tests as `zig build test` but in a linux container. This exercises the linux deps in `src/deps`.
 
 **E2E test in linux container**
 - `zig build run` runs the full executable in a linux container, executing `smoke_test.zig` as a sandboxed guest process. It will print out a scorecard of which features are supported so far. The goal is to get it to 100%, then add more tests!

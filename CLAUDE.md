@@ -15,23 +15,16 @@ The goal of bVisor is to be lightweight sandbox for untrusted user or LLM-genera
 ## Build Commands
 
 ```bash
-zig build              # Build for aarch64-linux-musl
-zig build test         # Run tests
+zig build                    # Build for aarch64-linux-musl
+zig build test               # Run unit tests on host
+zig build test -Duse-docker  # Run unit tests in Docker container
+zig build run                # Run executable in Docker container
 ```
 
 The build targets aarch64 Linux with musl ABI (for ARM64/Apple Silicon Docker). Modify `build.zig` line 6-8 for other targets.
 
 **Requires**: Zig 0.16.0-dev or later
 
-## Running on macOS
-
-Seccomp only works on Linux. To test on macOS, use Docker:
-
-```bash
-zig build
-docker run --rm -v ./zig-out:/zig-out alpine /zig-out/bin/bVisor
-# Inside container: /zig-out/bin/bVisor
-```
 
 ## Architecture
 
