@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
