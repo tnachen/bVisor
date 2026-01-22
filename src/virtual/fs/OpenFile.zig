@@ -10,18 +10,18 @@ const SupervisorPID = Proc.SupervisorPID;
 /// Tagged union representing different types of open files.
 pub const OpenFile = union(enum) {
     kernel: types.SupervisorFD, // supervisor maintains virtual FDs for every fd, for consistency
-    proc: ProcFD, // virtualized proc file
-    cow: CowFD, // copy-on-write file, created only if user requests more than read perms
+    proc: ProcFile, // virtualized proc file
+    cow: CowFile, // copy-on-write file, created only if user requests more than read perms
 
     const Self = @This();
 
-    pub const ProcFD = union(enum) {
+    pub const ProcFile = union(enum) {
         self: struct {
             pid: SupervisorPID,
             offset: usize = 0,
         },
 
-        pub fn read(self: *ProcFD, buf: []u8) usize {
+        pub fn read(self: *ProcFile, buf: []u8) usize {
             switch (self.*) {
                 .self => |*s| {
                     var tmp: [16]u8 = undefined;
@@ -38,18 +38,18 @@ pub const OpenFile = union(enum) {
 
     /// Copy-on-write file descriptor.
     /// The backing_fd points to a file in the COW root directory.
-    pub const CowFD = struct {
+    pub const CowFile = struct {
         backing_fd: types.SupervisorFD,
 
-        pub fn read(self: *CowFD, buf: []u8) !usize {
+        pub fn read(self: *CowFile, buf: []u8) !usize {
             return posix.read(self.backing_fd, buf);
         }
 
-        pub fn write(self: *CowFD, data: []const u8) !usize {
+        pub fn write(self: *CowFile, data: []const u8) !usize {
             return posix.write(self.backing_fd, data);
         }
 
-        pub fn close(self: *CowFD) void {
+        pub fn close(self: *CowFile) void {
             posix.close(self.backing_fd);
         }
     };
@@ -85,14 +85,14 @@ pub const OpenFile = union(enum) {
 const testing = std.testing;
 
 test "OpenFile.ProcFD.self read returns pid" {
-    var proc_fd: OpenFile.ProcFD = .{ .self = .{ .pid = 42 } };
+    var proc_fd: OpenFile.ProcFile = .{ .self = .{ .pid = 42 } };
     var buf: [16]u8 = undefined;
     const n = proc_fd.read(&buf);
     try testing.expectEqualStrings("42\n", buf[0..n]);
 }
 
 test "OpenFile.ProcFD.self read tracks offset" {
-    var proc_fd: OpenFile.ProcFD = .{ .self = .{ .pid = 123 } };
+    var proc_fd: OpenFile.ProcFile = .{ .self = .{ .pid = 123 } };
     var buf: [2]u8 = undefined;
 
     const n1 = proc_fd.read(&buf);
