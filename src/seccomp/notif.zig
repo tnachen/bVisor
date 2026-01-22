@@ -49,7 +49,7 @@ pub fn replyErr(id: u64, err: linux.E) linux.SECCOMP.notif_resp {
         .id = id,
         .flags = 0,
         .val = 0,
-        .@"error" = @intFromEnum(err),
+        .@"error" = -@as(i32, @intCast(@intFromEnum(err))),
     };
 }
 
