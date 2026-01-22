@@ -2,7 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../types.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 const Result = types.LinuxResult;
 
 const BPFInstruction = extern struct {
@@ -19,9 +19,9 @@ const BPFFilterProgram = extern struct {
 
 /// Predict the next available FD (used for pre-sending notify FD to supervisor).
 /// Caller must ensure no FDs are opened between this call and install().
-pub fn predictNotifyFd() !KernelFD {
+pub fn predictNotifyFd() !SupervisorFD {
     // dup(0) returns the lowest available fd
-    const next_fd: KernelFD = try posix.dup(0);
+    const next_fd: SupervisorFD = try posix.dup(0);
     posix.close(next_fd);
     return next_fd;
 }
@@ -29,17 +29,12 @@ pub fn predictNotifyFd() !KernelFD {
 /// Install seccomp filter that intercepts all syscalls via USER_NOTIF.
 /// Returns the notify FD that the supervisor should listen on.
 /// Requires NO_NEW_PRIVS to be set first.
-pub fn install() !KernelFD {
+pub fn install() !SupervisorFD {
     // BPF program that triggers USER_NOTIF for all syscalls
     // In the future we can make this more restrictive
 
-    // ERIK TODO: need a better, unified way of replying to syscalls. We have too many abstractions
-    // Also hard blocks should come from here. Maybe comptime build this based on syscall coverage, that'd be sick
-    // Have syscall enums somewhere, get a get_blocked and get_passthrough comptime function so we don't have to litter
-    // The syscall enum with BPF concerns, still doing it here.
-    // Only fully virtualized syscalls and conditionally virtualized syscalls should make it to supervisor
-    // One big ol' syscalls enum with every syscall, of a variant.
-    // Then a handled_syscalls or otherwise named thing containing implementations. It shouldn't be too complicated.
+    // ERIK TODO: do comptime lookup to view the supported syscalls and build bpf instructions at comptime accordingly, to
+    // include blocked and continue cases to be handled at the BPF layer
     var instructions = [_]BPFInstruction{
         .{ .code = linux.BPF.RET | linux.BPF.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.USER_NOTIF },
     };
@@ -52,7 +47,7 @@ pub fn install() !KernelFD {
     // Required before installing seccomp filter
     _ = try posix.prctl(posix.PR.SET_NO_NEW_PRIVS, .{ 1, 0, 0, 0 });
 
-    return try Result(KernelFD).from(
+    return try Result(SupervisorFD).from(
         linux.seccomp(
             linux.SECCOMP.SET_MODE_FILTER,
             linux.SECCOMP.FILTER_FLAG.NEW_LISTENER,

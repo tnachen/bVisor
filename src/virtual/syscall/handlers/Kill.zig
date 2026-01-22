@@ -11,8 +11,8 @@ const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const isError = @import("../../../seccomp/notif.zig").isError;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const caller_pid: Proc.KernelPID = @intCast(notif.pid);
-    const target_pid: Proc.KernelPID = @intCast(@as(i64, @bitCast(notif.data.arg0)));
+    const caller_pid: Proc.SupervisorPID = @intCast(notif.pid);
+    const target_pid: Proc.GuestPID = @intCast(@as(i64, @bitCast(notif.data.arg0)));
     const signal: u6 = @truncate(notif.data.arg1);
 
     // Negative PIDs (process groups) not supported
@@ -20,18 +20,16 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyErr(notif.id, .INVAL);
     }
 
-    const caller = supervisor.virtual_procs.get(caller_pid) catch
+    const caller = supervisor.guest_procs.get(caller_pid) catch
         return replyErr(notif.id, .SRCH);
 
-    // TODO ERIK get target via namespace reference frame, not from virtual_procs
-    // also rename virtual_procs to "kernel_procs" and make the type of target_pid and args to namespace procs be virtualPID
-    // caller.namespace.procs.get(self.target_pid) catch
-    // const target: *Proc = caller.namespace.procs.get(self.target_pid)
+    // TODO ERIK get target via namespace reference frame of the caller, not from guest_procs
 
-    const target = supervisor.virtual_procs.get(target_pid) catch
+    const target = supervisor.guest_procs.get(target_pid) catch
         return replyErr(notif.id, .SRCH);
 
     // Caller must be able to see target
+    // TODO: rethink, this lookup is all messed up and ignores GuestPIDs being an option
     if (!caller.canSee(target)) {
         return replyErr(notif.id, .SRCH);
     }

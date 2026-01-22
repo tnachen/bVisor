@@ -1,9 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("../../types.zig");
-const FD = @import("FD.zig").FD;
+const OpenFile = @import("FD.zig").OpenFile;
 
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 
 /// Virtual file descriptor - the fd number visible to the sandboxed process.
 /// We manage all fd allocation, so these start at 3 (after stdin/stdout/stderr).
@@ -16,7 +16,7 @@ const Self = @This();
 /// When CLONE_FILES is not set, child gets a clone (copy with fresh refcount).
 ref_count: usize,
 allocator: Allocator,
-fds: std.AutoHashMapUnmanaged(VirtualFD, FD),
+fds: std.AutoHashMapUnmanaged(VirtualFD, OpenFile),
 next_vfd: VirtualFD = 3, // start after stdin/stdout/stderr
 
 pub fn init(allocator: Allocator) !*Self {
@@ -49,7 +49,7 @@ pub fn clone(self: *Self) !*Self {
     errdefer self.allocator.destroy(new);
 
     // AutoHashMapUnmanaged has no clone(), so we iterate manually
-    var new_fds: std.AutoHashMapUnmanaged(VirtualFD, FD) = .empty;
+    var new_fds: std.AutoHashMapUnmanaged(VirtualFD, OpenFile) = .empty;
     errdefer new_fds.deinit(self.allocator);
 
     var iter = self.fds.iterator();
@@ -66,19 +66,19 @@ pub fn clone(self: *Self) !*Self {
     return new;
 }
 
-pub fn insert(self: *Self, vfd: VirtualFD, file: FD) !void {
+pub fn insert(self: *Self, vfd: VirtualFD, file: OpenFile) !void {
     try self.fds.put(self.allocator, vfd, file);
 }
 
 /// Allocate a new virtual fd number, insert the file, and return the vfd
-pub fn open(self: *Self, file: FD) !VirtualFD {
+pub fn open(self: *Self, file: OpenFile) !VirtualFD {
     const vfd = self.next_vfd;
     self.next_vfd += 1;
     try self.fds.put(self.allocator, vfd, file);
     return vfd;
 }
 
-pub fn get(self: *Self, vfd: VirtualFD) ?*FD {
+pub fn get(self: *Self, vfd: VirtualFD) ?*OpenFile {
     return self.fds.getPtr(vfd);
 }
 

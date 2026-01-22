@@ -3,41 +3,38 @@ const posix = std.posix;
 const linux = std.os.linux;
 const types = @import("types.zig");
 const seccomp = @import("seccomp/filter.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 const Logger = types.Logger;
 const Supervisor = @import("Supervisor.zig");
 
 // comptime dependency injection
 const deps = @import("deps/deps.zig");
 // ERIK TODO: now that we have unit tests in docker, consider removing deps comptime switch entirely
-const lookupChildFd = deps.pidfd.lookupChildFdWithRetry;
+const lookupGuestFd = deps.pidfd.lookupGuestFdWithRetry;
 
 pub fn setupAndRun(runnable: *const fn (io: std.Io) void) !void {
     // Create socket pair for IPC between child and supervisor
-    const socket_pair: [2]KernelFD = try posix.socketpair(
+    const socket_pair: [2]SupervisorFD = try posix.socketpair(
         linux.AF.UNIX,
         linux.SOCK.STREAM,
         0,
     );
-    const child_sock, const supervisor_sock = socket_pair;
+    const guest_sock, const supervisor_sock = socket_pair;
 
-    // ERIK TODO: figure out why fork vs clone. understand the diff
     const fork_result = try posix.fork();
     if (fork_result == 0) {
-        // Child process
         posix.close(supervisor_sock);
-        try childProcess(child_sock, runnable); // ERIK TODO: rename to initialGuestProcess
+        try guestProcess(guest_sock, runnable);
     } else {
-        // Supervisor process
-        posix.close(child_sock);
-        const child_pid: linux.pid_t = fork_result; // ERIK TODO: understand tid vs pid, decide what to do
-        try supervisorProcess(supervisor_sock, child_pid);
+        posix.close(guest_sock);
+        const init_guest_pid: linux.pid_t = fork_result;
+        try supervisorProcess(supervisor_sock, init_guest_pid);
     }
 }
 
-fn childProcess(socket: KernelFD, runnable: *const fn (io: std.Io) void) !void {
-    const logger = Logger.init(.child);
-    logger.log("Child process starting", .{});
+fn guestProcess(socket: SupervisorFD, runnable: *const fn (io: std.Io) void) !void {
+    const logger = Logger.init(.guest);
+    logger.log("Guest process starting", .{});
 
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
@@ -65,8 +62,7 @@ fn childProcess(socket: KernelFD, runnable: *const fn (io: std.Io) void) !void {
     @call(.never_inline, runnable, .{io});
 }
 
-fn supervisorProcess(socket: KernelFD, child_pid: linux.pid_t) !void {
-    // ERIK TODO: set up allocator and threaded in main vs redundantly in child and supervisor? Depends if fork shares any memory
+fn supervisorProcess(socket: SupervisorFD, init_guest_pid: linux.pid_t) !void {
     const logger = Logger.init(.supervisor);
     logger.log("Supervisor process starting", .{});
     defer logger.log("Supervisor process exiting", .{});
@@ -79,32 +75,27 @@ fn supervisorProcess(socket: KernelFD, child_pid: linux.pid_t) !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    // Receive predicted notify FD from child
-    const child_notify_fd = try recvFd(socket);
+    const guest_notify_fd = try recvFd(socket);
     posix.close(socket);
 
-    // Get actual notify FD by looking up child's FD table
-    const notify_fd = try lookupChildFd(child_pid, child_notify_fd, io);
+    const notify_fd = try lookupGuestFd(init_guest_pid, guest_notify_fd, io);
 
-    // Run the supervisor loop
-    var supervisor = try Supervisor.init(gpa, io, notify_fd, child_pid);
+    var supervisor = try Supervisor.init(gpa, io, notify_fd, init_guest_pid);
     defer supervisor.deinit();
     try supervisor.run();
 }
 
-fn sendFd(socket: KernelFD, fd: KernelFD) !void {
-    // ERIK TODO: split out into deps? create separate ipc file?
-    // TBH it could be here, posix api is nice
+fn sendFd(socket: SupervisorFD, fd: SupervisorFD) !void {
     var fd_bytes: [4]u8 = undefined;
-    std.mem.writeInt(KernelFD, &fd_bytes, fd, .little);
+    std.mem.writeInt(SupervisorFD, &fd_bytes, fd, .little);
     _ = try posix.write(socket, &fd_bytes);
 }
 
-fn recvFd(socket: KernelFD) !KernelFD {
+fn recvFd(socket: SupervisorFD) !SupervisorFD {
     var fd_bytes: [4]u8 = undefined;
     const bytes_read = try posix.read(socket, &fd_bytes);
     if (bytes_read != 4) {
         return error.FdReadFailed;
     }
-    return std.mem.readInt(KernelFD, &fd_bytes, .little);
+    return std.mem.readInt(SupervisorFD, &fd_bytes, .little);
 }

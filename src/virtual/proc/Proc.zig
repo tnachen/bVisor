@@ -4,25 +4,21 @@ const Allocator = std.mem.Allocator;
 const Namespace = @import("Namespace.zig");
 const FdTable = @import("../fs/FdTable.zig");
 
-// ERIK TODO:
-// - rename KernelPID to SupervisorPID (a pid as visible rom the supervisor)
-// - rename VirtualPID to GuestPID (a pid as visible by that guest process, requiring lookup via namespace)
-// - rename KernelFD to SupervisorFD (a pid as owned (visible) by the supervisor)
-// - keep VirtualFD as VirtualFD (it is a GuestFD, but since the supervisor created it, we know it's virutalized)
-pub const KernelPID = linux.pid_t;
+pub const SupervisorPID = linux.pid_t;
+pub const GuestPID = linux.pid_t; // a pid as visible by that guest process, requiring lookup via namespace
 
 const ProcSet = std.AutoHashMapUnmanaged(*Self, void);
 const ProcList = std.ArrayList(*Self);
 
 const Self = @This();
 
-pid: KernelPID,
+pid: SupervisorPID,
 namespace: *Namespace,
 fd_table: *FdTable,
 parent: ?*Self,
 children: ProcSet = .empty,
 
-pub fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_table: ?*FdTable, parent: ?*Self) !*Self {
+pub fn init(allocator: Allocator, pid: SupervisorPID, namespace: ?*Namespace, fd_table: ?*FdTable, parent: ?*Self) !*Self {
     // Create or use provided fd_table
     const fdt = fd_table orelse try FdTable.init(allocator);
     errdefer if (fd_table == null) fdt.unref();
@@ -33,16 +29,17 @@ pub fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_tab
         errdefer ns_acquired.unref();
 
         const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+
+        // register in own namespace and all ancestors
+        try ns_acquired.registerProc(allocator, self);
+
         self.* = .{
             .pid = pid,
             .namespace = ns_acquired,
             .fd_table = fdt,
             .parent = parent,
         };
-        errdefer allocator.destroy(self);
-
-        // register in own namespace and all ancestors
-        try ns_acquired.registerProc(allocator, self);
 
         return self;
     }
@@ -53,16 +50,17 @@ pub fn init(allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_tab
     errdefer ns.unref();
 
     const self = try allocator.create(Self);
+    errdefer allocator.destroy(self);
+
+    // register in own namespace and all ancestors
+    try ns.registerProc(allocator, self);
+
     self.* = .{
         .pid = pid,
         .namespace = ns,
         .fd_table = fdt,
         .parent = parent,
     };
-    errdefer allocator.destroy(self);
-
-    // register in own namespace and all ancestors
-    try ns.registerProc(allocator, self);
 
     return self;
 }
@@ -97,7 +95,7 @@ pub fn getNamespaceRoot(self: *Self) *Self {
     return current;
 }
 
-pub fn initChild(self: *Self, allocator: Allocator, pid: KernelPID, namespace: ?*Namespace, fd_table: ?*FdTable) !*Self {
+pub fn initChild(self: *Self, allocator: Allocator, pid: SupervisorPID, namespace: ?*Namespace, fd_table: ?*FdTable) !*Self {
     const child = try Self.init(allocator, pid, namespace, fd_table, self);
     errdefer child.deinit(allocator);
 

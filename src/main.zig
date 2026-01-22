@@ -23,10 +23,9 @@ test {
 }
 
 pub fn main() !void {
-    // ERIK TODO: logger as dep injection? just init wherever needed? why make a struct?
     const logger = Logger.init(.prefork);
+    logger.log("Running smoke test with syscall interception:", .{});
 
     // Run the smoke test inside the sandbox
-    logger.log("Running smoke test with syscall interception:", .{});
     try setupAndRun(smokeTest);
 }

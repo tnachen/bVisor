@@ -3,7 +3,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
 const Proc = @import("../../proc/Proc.zig");
-const FD = @import("../../fs/FD.zig").FD;
+const OpenFile = @import("../../fs/FD.zig").OpenFile;
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
@@ -16,7 +16,7 @@ const deps = @import("../../../deps/deps.zig");
 const memory_bridge = deps.memory_bridge;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const kernel_pid: Proc.KernelPID = @intCast(notif.pid);
+    const supervisor_pid: Proc.SupervisorPID = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const buf_ptr: u64 = notif.data.arg1;
     const count: usize = @truncate(notif.data.arg2);
@@ -28,7 +28,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         linux.STDOUT_FILENO => {
             var buf: [4096]u8 = undefined;
             const read_count = @min(count, buf.len);
-            memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr) catch {
+            memory_bridge.readSlice(buf[0..read_count], supervisor_pid, buf_ptr) catch {
                 return replyErr(notif.id, .FAULT);
             };
             logger.log("stdout:\n\n{s}", .{std.mem.sliceTo(buf[0..read_count], 0)});
@@ -37,7 +37,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         linux.STDERR_FILENO => {
             var buf: [4096]u8 = undefined;
             const read_count = @min(count, buf.len);
-            memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr) catch {
+            memory_bridge.readSlice(buf[0..read_count], supervisor_pid, buf_ptr) catch {
                 return replyErr(notif.id, .FAULT);
             };
             logger.log("stderr:\n\n{s}", .{std.mem.sliceTo(buf[0..read_count], 0)});
@@ -47,8 +47,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     }
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.get(kernel_pid) catch {
-        logger.log("write: process not found for pid={d}", .{kernel_pid});
+    const proc = supervisor.guest_procs.get(supervisor_pid) catch {
+        logger.log("write: process not found for pid={d}", .{supervisor_pid});
         return replyErr(notif.id, .SRCH);
     };
 
@@ -61,7 +61,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Write up to min(count, 4096) - short writes are valid POSIX behavior
     var buf: [4096]u8 = undefined;
     const write_size = @min(count, buf.len);
-    memory_bridge.readSlice(buf[0..write_size], kernel_pid, buf_ptr) catch {
+    memory_bridge.readSlice(buf[0..write_size], supervisor_pid, buf_ptr) catch {
         return replyErr(notif.id, .FAULT);
     };
 
@@ -76,13 +76,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 test "write to stdout returns success" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const test_data = "hello stdout";
     const notif = makeNotif(.write, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = linux.STDOUT_FILENO,
         .arg1 = @intFromPtr(test_data.ptr),
         .arg2 = test_data.len,
@@ -95,13 +95,13 @@ test "write to stdout returns success" {
 
 test "write to stderr returns success" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const test_data = "hello stderr";
     const notif = makeNotif(.write, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = linux.STDERR_FILENO,
         .arg1 = @intFromPtr(test_data.ptr),
         .arg2 = test_data.len,
@@ -114,13 +114,13 @@ test "write to stderr returns success" {
 
 test "write to invalid fd returns EBADF" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const test_data = "test";
     const notif = makeNotif(.write, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = 999, // invalid fd
         .arg1 = @intFromPtr(test_data.ptr),
         .arg2 = test_data.len,
@@ -133,8 +133,8 @@ test "write to invalid fd returns EBADF" {
 
 test "write to kernel fd works" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     // Create a temp file and open it
@@ -152,7 +152,7 @@ test "write to kernel fd works" {
 
     // Open file for writing
     const open_notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr(test_path),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .WRONLY, .CREAT = true }))),
@@ -165,7 +165,7 @@ test "write to kernel fd works" {
     // Write to the file
     const test_data = "hello write";
     const write_notif = makeNotif(.write, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @as(u64, @intCast(vfd)),
         .arg1 = @intFromPtr(test_data.ptr),
         .arg2 = test_data.len,
@@ -176,14 +176,14 @@ test "write to kernel fd works" {
     try testing.expectEqual(@as(i64, @intCast(test_data.len)), write_res.val);
 
     // Close and verify by reading the file
-    const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
+    const proc = supervisor.guest_procs.lookup.get(guest_pid).?;
     var fd = proc.fd_table.get(vfd).?;
     fd.close();
     _ = proc.fd_table.remove(vfd);
 
     // Read back via a new open - COW should have the content
     const read_notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr(test_path),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -192,7 +192,7 @@ test "write to kernel fd works" {
     try testing.expect(!isError(read_open_res));
 
     const read_vfd: i32 = @intCast(read_open_res.val);
-    const proc2 = supervisor.virtual_procs.lookup.get(child_pid).?;
+    const proc2 = supervisor.guest_procs.lookup.get(guest_pid).?;
     var read_fd = proc2.fd_table.get(read_vfd).?;
     var buf: [64]u8 = undefined;
     const n = try read_fd.read(&buf);

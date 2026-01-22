@@ -3,7 +3,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
 const Proc = @import("../../proc/Proc.zig");
-const FD = @import("../../fs/FD.zig").FD;
+const OpenFile = @import("../../fs/FD.zig").OpenFile;
 const openat = @import("openat.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
@@ -21,7 +21,7 @@ const memory_bridge = deps.memory_bridge;
 const MAX_IOV = 16;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const kernel_pid: Proc.KernelPID = @intCast(notif.pid);
+    const supervisor_pid: Proc.SupervisorPID = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
@@ -30,7 +30,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var total_requested: usize = 0;
     for (0..iovec_count) |i| {
         const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec);
-        iovecs[i] = memory_bridge.read(posix.iovec, kernel_pid, iov_addr) catch {
+        iovecs[i] = memory_bridge.read(posix.iovec, supervisor_pid, iov_addr) catch {
             return replyErr(notif.id, .FAULT);
         };
         total_requested += iovecs[i].len;
@@ -45,8 +45,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     }
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.get(kernel_pid) catch {
-        logger.log("readv: process not found for pid={d}", .{kernel_pid});
+    const proc = supervisor.guest_procs.get(supervisor_pid) catch {
+        logger.log("readv: process not found for pid={d}", .{supervisor_pid});
         return replyErr(notif.id, .SRCH);
     };
 
@@ -76,7 +76,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         const to_write = @min(iov.len, remaining);
 
         if (to_write > 0) {
-            memory_bridge.writeSlice(buf[bytes_written..][0..to_write], kernel_pid, buf_ptr) catch {
+            memory_bridge.writeSlice(buf[bytes_written..][0..to_write], supervisor_pid, buf_ptr) catch {
                 return replyErr(notif.id, .FAULT);
             };
             bytes_written += to_write;
@@ -89,13 +89,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 test "readv from proc fd returns pid" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 200;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 200;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     // First open a /proc/self fd
     const open_notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr("/proc/self/status"),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -113,7 +113,7 @@ test "readv from proc fd returns pid" {
     };
 
     const read_notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(u64, @intCast(vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,
@@ -133,8 +133,8 @@ test "readv from proc fd returns pid" {
 
 test "readv from invalid fd returns EBADF" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -143,7 +143,7 @@ test "readv from invalid fd returns EBADF" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = 999, // invalid fd
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,
@@ -156,8 +156,8 @@ test "readv from invalid fd returns EBADF" {
 
 test "readv from stdin returns continue" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -166,7 +166,7 @@ test "readv from stdin returns continue" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = linux.STDIN_FILENO,
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,

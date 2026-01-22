@@ -5,7 +5,7 @@ const linux = std.os.linux;
 const Io = std.Io;
 const Dir = Io.Dir;
 const types = @import("../../types.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 
 const Self = @This();
 
@@ -51,7 +51,7 @@ pub fn exists(self: *const Self, io: Io, virtual_path: []const u8) bool {
 }
 
 /// Opens COW file, copying from original on first write.
-pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O, mode: linux.mode_t) !KernelFD {
+pub fn open(self: *const Self, io: Io, virtual_path: []const u8, flags: linux.O, mode: linux.mode_t) !SupervisorFD {
     const rel_path = relPath(virtual_path);
 
     var posix_flags: posix.O = .{};

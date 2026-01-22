@@ -3,7 +3,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
 const Proc = @import("../../proc/Proc.zig");
-const FD = @import("../../fs/FD.zig").FD;
+const OpenFile = @import("../../fs/FD.zig").OpenFile;
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
@@ -18,7 +18,7 @@ const deps = @import("../../../deps/deps.zig");
 const memory_bridge = deps.memory_bridge;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const kernel_pid: Proc.KernelPID = @intCast(notif.pid);
+    const supervisor_pid: Proc.SupervisorPID = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const buf_ptr: u64 = notif.data.arg1;
     const count: usize = @truncate(notif.data.arg2);
@@ -32,8 +32,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     }
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.get(kernel_pid) catch {
-        logger.log("read: process not found for pid={d}", .{kernel_pid});
+    const proc = supervisor.guest_procs.get(supervisor_pid) catch {
+        logger.log("read: process not found for pid={d}", .{supervisor_pid});
         return replyErr(notif.id, .SRCH);
     };
 
@@ -53,7 +53,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     };
 
     if (n > 0) {
-        memory_bridge.writeSlice(buf[0..n], kernel_pid, buf_ptr) catch {
+        memory_bridge.writeSlice(buf[0..n], supervisor_pid, buf_ptr) catch {
             return replyErr(notif.id, .FAULT);
         };
     }
@@ -64,14 +64,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 test "read from proc fd returns pid" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     // First open a /proc/self fd
     const OpenAt = @import("OpenAt.zig");
     const open_notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr("/proc/self/status"),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -83,7 +83,7 @@ test "read from proc fd returns pid" {
     // Now read from it
     var child_buf: [64]u8 = undefined;
     const read_notif = makeNotif(.read, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(u64, @intCast(vfd))),
         .arg1 = @intFromPtr(&child_buf),
         .arg2 = child_buf.len,
@@ -98,13 +98,13 @@ test "read from proc fd returns pid" {
 
 test "read from invalid fd returns EBADF" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var child_buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = 999, // invalid fd
         .arg1 = @intFromPtr(&child_buf),
         .arg2 = child_buf.len,
@@ -117,13 +117,13 @@ test "read from invalid fd returns EBADF" {
 
 test "read from stdin returns use_kernel" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var child_buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = linux.STDIN_FILENO,
         .arg1 = @intFromPtr(&child_buf),
         .arg2 = child_buf.len,

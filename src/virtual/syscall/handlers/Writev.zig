@@ -2,7 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 const Supervisor = @import("../../../Supervisor.zig");
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
@@ -61,6 +61,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
                 logger.log("writev: error writing to stdout", .{});
                 return replyErr(notif.id, .IO);
             };
+            stdout.flush() catch {
+                logger.log("writev: error flushing stdout", .{});
+                return replyErr(notif.id, .IO);
+            };
         },
         linux.STDERR_FILENO => {
             var stderr_buffer: [1024]u8 = undefined;
@@ -68,6 +72,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             const stderr = &stderr_writer.interface;
             stderr.writeAll(data) catch {
                 logger.log("writev: error writing to stderr", .{});
+                return replyErr(notif.id, .IO);
+            };
+            stderr.flush() catch {
+                logger.log("writev: error flushing stderr", .{});
                 return replyErr(notif.id, .IO);
             };
         },

@@ -4,11 +4,11 @@ const linux = std.os.linux;
 const posix = std.posix;
 const Proc = @import("../../../virtual/proc/Proc.zig");
 const Procs = @import("../../../virtual/proc/Procs.zig");
-const FD = @import("../../../virtual/fs/FD.zig").FD;
+const OpenFile = @import("../../../virtual/fs/FD.zig").OpenFile;
 const FdTable = @import("../../../virtual/fs/FdTable.zig");
 const types = @import("../../../types.zig");
 const Supervisor = @import("../../../Supervisor.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
@@ -189,7 +189,7 @@ fn cowErrorToLinuxErrno(err: anytype) linux.E {
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
-    const kernel_pid: Proc.KernelPID = @intCast(notif.pid);
+    const supervisor_pid: Proc.SupervisorPID = @intCast(notif.pid);
 
     // Parse arguments
     const path_ptr: u64 = notif.data.arg1;
@@ -203,7 +203,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyErr(notif.id, .FAULT);
     };
 
-    const dirfd: KernelFD = @truncate(@as(i64, @bitCast(notif.data.arg0)));
+    const dirfd: SupervisorFD = @truncate(@as(i64, @bitCast(notif.data.arg0)));
     const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
     const mode: linux.mode_t = @truncate(notif.data.arg3);
 
@@ -217,27 +217,27 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             return replyErr(notif.id, .PERM);
         },
         .allow => {
-            return handleAllow(notif.id, kernel_pid, dirfd, path_slice, flags, mode, supervisor);
+            return handleAllow(notif.id, supervisor_pid, dirfd, path_slice, flags, mode, supervisor);
         },
         .virtualize_proc => {
-            return handleVirtualizeProc(notif.id, kernel_pid, path_slice, supervisor);
+            return handleVirtualizeProc(notif.id, supervisor_pid, path_slice, supervisor);
         },
         .virtualize_tmp => {
-            return handleVirtualizeTmp(notif.id, kernel_pid, path_slice, flags, mode, supervisor);
+            return handleVirtualizeTmp(notif.id, supervisor_pid, path_slice, flags, mode, supervisor);
         },
     }
 }
 
 fn handleVirtualizeProc(
     notif_id: u64,
-    kernel_pid: Proc.KernelPID,
+    supervisor_pid: Proc.SupervisorPID,
     path_slice: []const u8,
     supervisor: *Supervisor,
 ) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.get(kernel_pid) catch |err| {
+    const proc = supervisor.guest_procs.get(supervisor_pid) catch |err| {
         logger.log("openat: process lookup failed: {}", .{err});
         return replyErr(notif_id, .SRCH);
     };
@@ -249,24 +249,24 @@ fn handleVirtualizeProc(
 
     // Determine target pid
     // Format: /proc/self/..., /proc/<pid>/..., or global files like /proc/meminfo
-    const target_pid: Proc.KernelPID = if (std.mem.eql(u8, pid_part, "self"))
+    const target_pid: Proc.SupervisorPID = if (std.mem.eql(u8, pid_part, "self"))
         proc.pid
     else
-        std.fmt.parseInt(Proc.KernelPID, pid_part, 10) catch
+        std.fmt.parseInt(Proc.SupervisorPID, pid_part, 10) catch
             // Not a numeric pid - global proc file (e.g., meminfo, cpuinfo)
             // Use caller's pid as placeholder
             proc.pid;
 
     // Ensure calling proc can see target proc
     // Return ENOENT for all lookup failures - matches how Linux /proc hides inaccessible processes
-    const target_proc = supervisor.virtual_procs.get(target_pid) catch
+    const target_proc = supervisor.guest_procs.get(target_pid) catch
         return replyErr(notif_id, .NOENT);
 
     if (!proc.canSee(target_proc)) {
         return replyErr(notif_id, .NOENT);
     }
 
-    const virtual_fd = FD{ .proc = .{ .self = .{ .pid = target_pid } } };
+    const virtual_fd = OpenFile{ .proc = .{ .self = .{ .pid = target_pid } } };
 
     // Insert into the process's fd_table and get virtual fd number
     const vfd = proc.fd_table.open(virtual_fd) catch |err| {
@@ -279,7 +279,7 @@ fn handleVirtualizeProc(
 
 fn handleVirtualizeTmp(
     notif_id: u64,
-    kernel_pid: Proc.KernelPID,
+    supervisor_pid: Proc.SupervisorPID,
     path_slice: []const u8,
     flags: linux.O,
     mode: linux.mode_t,
@@ -288,8 +288,8 @@ fn handleVirtualizeTmp(
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.lookup.get(kernel_pid) orelse {
-        std.debug.panic("openat: supervisor invariant violated - kernel pid {d} not in virtual_procs", .{kernel_pid});
+    const proc = supervisor.guest_procs.lookup.get(supervisor_pid) orelse {
+        std.debug.panic("openat: supervisor invariant violated - kernel pid {d} not in guest_procs", .{supervisor_pid});
     };
 
     // Open via private tmp - all reads and writes go to sandbox-local directory
@@ -310,8 +310,8 @@ fn handleVirtualizeTmp(
 
 fn handleAllow(
     notif_id: u64,
-    kernel_pid: Proc.KernelPID,
-    dirfd: KernelFD,
+    supervisor_pid: Proc.SupervisorPID,
+    dirfd: SupervisorFD,
     path_slice: []const u8,
     flags: linux.O,
     mode: linux.mode_t,
@@ -320,9 +320,9 @@ fn handleAllow(
     const logger = supervisor.logger;
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.lookup.get(kernel_pid) orelse {
+    const proc = supervisor.guest_procs.lookup.get(supervisor_pid) orelse {
         // If the calling process isn't tracked, it's a supervisor invariant violation
-        std.debug.panic("openat: supervisor invariant violated - kernel pid {d} not in virtual_procs", .{kernel_pid});
+        std.debug.panic("openat: supervisor invariant violated - kernel pid {d} not in guest_procs", .{supervisor_pid});
     };
     // ERIK TODO: this is horribly complex, bad claude
     // Need null-terminated path for syscalls
@@ -387,8 +387,8 @@ fn handleAllow(
 
 test "openat blocks /sys and /run paths" {
     const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const blocked_paths = [_][*:0]const u8{
@@ -398,7 +398,7 @@ test "openat blocks /sys and /run paths" {
 
     for (blocked_paths) |path_ptr| {
         const notif = makeNotif(.openat, .{
-            .pid = child_pid,
+            .pid = guest_pid,
             .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
             .arg1 = @intFromPtr(path_ptr),
             .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -418,12 +418,12 @@ test "useVFS detects write modes" {
 
 test "openat virtualizes /proc paths" {
     const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 12345;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 12345;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr("/proc/self/status"),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -435,12 +435,12 @@ test "openat virtualizes /proc paths" {
 
 test "openat handles allowed paths (returns NOENT for missing file)" {
     const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr("/tmp/nonexistent_test_file.txt"),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -453,8 +453,8 @@ test "openat handles allowed paths (returns NOENT for missing file)" {
 
 test "openat O_CREAT creates file, write and read back" {
     const allocator = std.testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     const test_path = "/tmp/bvisor_test_creat.txt";
@@ -472,7 +472,7 @@ test "openat O_CREAT creates file, write and read back" {
     // Step 1: Create and write to file (now goes to COW)
     {
         const notif = makeNotif(.openat, .{
-            .pid = child_pid,
+            .pid = guest_pid,
             .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
             .arg1 = @intFromPtr(test_path),
             .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .WRONLY, .CREAT = true }))),
@@ -486,7 +486,7 @@ test "openat O_CREAT creates file, write and read back" {
         try testing.expectEqual(@as(FdTable.VirtualFD, 3), vfd);
 
         // Get the FD and write to it (now via FD.write)
-        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
+        const proc = supervisor.guest_procs.lookup.get(guest_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         _ = try fd.write(test_content);
         fd.close();
@@ -496,7 +496,7 @@ test "openat O_CREAT creates file, write and read back" {
     // Step 2: Open for read and verify content (should read from COW)
     {
         const notif = makeNotif(.openat, .{
-            .pid = child_pid,
+            .pid = guest_pid,
             .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
             .arg1 = @intFromPtr(test_path),
             .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
@@ -508,7 +508,7 @@ test "openat O_CREAT creates file, write and read back" {
         const vfd: FdTable.VirtualFD = @intCast(resp.val);
 
         // Read via FD.read
-        const proc = supervisor.virtual_procs.lookup.get(child_pid).?;
+        const proc = supervisor.guest_procs.lookup.get(guest_pid).?;
         var fd = proc.fd_table.get(vfd).?;
         var buf: [64]u8 = undefined;
         const n = try fd.read(&buf);
