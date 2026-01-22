@@ -134,7 +134,7 @@ test "write to invalid fd returns EBADF" {
 
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
-    try testing.expectEqual(linux.E.BADF, @as(linux.E, @enumFromInt(resp.@"error")));
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.BADF)), resp.@"error");
 }
 
 test "write to kernel fd works" {

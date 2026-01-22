@@ -61,7 +61,7 @@ test "kill with negative pid returns EINVAL" {
 
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
-    try testing.expectEqual(@as(i32, @intFromEnum(linux.E.INVAL)), resp.@"error");
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.INVAL)), resp.@"error");
 }
 
 test "kill with zero pid returns EINVAL" {
@@ -77,5 +77,5 @@ test "kill with zero pid returns EINVAL" {
 
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
-    try testing.expectEqual(@as(i32, @intFromEnum(linux.E.INVAL)), resp.@"error");
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.INVAL)), resp.@"error");
 }

@@ -12,6 +12,7 @@ const writev = @import("handlers/writev.zig");
 const openat = @import("handlers/openat.zig");
 const getpid = @import("handlers/getpid.zig");
 const getppid = @import("handlers/getppid.zig");
+const gettid = @import("handlers/gettid.zig");
 const kill = @import("handlers/kill.zig");
 const exit_group = @import("handlers/exit_group.zig");
 
@@ -29,6 +30,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),
+        .gettid => gettid.handle(notif, supervisor),
         .kill => kill.handle(notif, supervisor),
         .exit_group => exit_group.handle(notif, supervisor),
 
@@ -52,7 +54,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .faccessat,
         // To implement - process
         .set_tid_address,
-        .gettid,
         .execve,
         .wait4,
         .exit,
@@ -66,6 +67,11 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
             return replyErr(notif.id, .NOSYS);
         },
 
+        // Passthrough - user identity (read-only)
+        .getuid,
+        .geteuid,
+        .getgid,
+        .getegid,
         // Passthrough - memory (process-local, no leak)
         .brk,
         .mmap,
@@ -96,9 +102,12 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .futex_waitv,
         // Passthrough - random (safe)
         .getrandom,
+        // Passthrough - runtime (process-local)
+        .set_robust_list,
+        .rseq,
         => replyContinue(notif.id),
 
-        // Blocked - escape/privilege
+        // Blocked - escape/privilege (return ENOSYS to indicate unavailable)
         .ptrace,
         .mount,
         .umount2,
@@ -121,7 +130,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .prlimit64,
         // Blocked - execution domain exploits
         .personality,
-        => replyErr(notif.id, .PERM),
+        => replyErr(notif.id, .NOSYS),
 
         else => {
             supervisor.logger.log("Not supported: {s}", .{@tagName(sys)});

@@ -112,7 +112,7 @@ test "read from invalid fd returns EBADF" {
 
     const res = handle(notif, &supervisor);
     try testing.expect(isError(res));
-    try testing.expectEqual(linux.E.BADF, @as(linux.E, @enumFromInt(res.@"error")));
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.BADF)), res.@"error");
 }
 
 test "read from stdin returns use_kernel" {

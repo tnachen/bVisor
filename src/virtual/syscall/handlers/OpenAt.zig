@@ -448,7 +448,7 @@ test "openat handles allowed paths (returns NOENT for missing file)" {
 
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
-    try testing.expectEqual(linux.E.NOENT, @as(linux.E, @enumFromInt(resp.@"error")));
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.NOENT)), resp.@"error");
 }
 
 test "openat O_CREAT creates file, write and read back" {
