@@ -2,13 +2,13 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 const Result = types.LinuxResult;
 
-pub inline fn lookupChildFd(_: linux.pid_t, local_fd: KernelFD) !KernelFD {
+pub inline fn lookupGuestFd(_: linux.pid_t, local_fd: SupervisorFD) !SupervisorFD {
     return local_fd;
 }
 
-pub inline fn lookupChildFdWithRetry(_: linux.pid_t, local_fd: KernelFD, _: std.Io) !KernelFD {
+pub inline fn lookupGuestFdWithRetry(_: linux.pid_t, local_fd: SupervisorFD, _: std.Io) !SupervisorFD {
     return local_fd;
 }

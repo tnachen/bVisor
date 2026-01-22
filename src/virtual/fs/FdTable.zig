@@ -1,9 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("../../types.zig");
-const FD = @import("FD.zig").FD;
+const OpenFile = @import("OpenFile.zig").OpenFile;
 
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 
 /// Virtual file descriptor - the fd number visible to the sandboxed process.
 /// We manage all fd allocation, so these start at 3 (after stdin/stdout/stderr).
@@ -16,7 +16,7 @@ const Self = @This();
 /// When CLONE_FILES is not set, child gets a clone (copy with fresh refcount).
 ref_count: usize,
 allocator: Allocator,
-fds: std.AutoHashMapUnmanaged(VirtualFD, FD),
+open_files: std.AutoHashMapUnmanaged(VirtualFD, OpenFile),
 next_vfd: VirtualFD = 3, // start after stdin/stdout/stderr
 
 pub fn init(allocator: Allocator) !*Self {
@@ -24,7 +24,7 @@ pub fn init(allocator: Allocator) !*Self {
     self.* = .{
         .ref_count = 1,
         .allocator = allocator,
-        .fds = .empty,
+        .open_files = .empty,
     };
     return self;
 }
@@ -37,7 +37,7 @@ pub fn ref(self: *Self) *Self {
 pub fn unref(self: *Self) void {
     self.ref_count -= 1;
     if (self.ref_count == 0) {
-        self.fds.deinit(self.allocator);
+        self.open_files.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 }
@@ -49,41 +49,41 @@ pub fn clone(self: *Self) !*Self {
     errdefer self.allocator.destroy(new);
 
     // AutoHashMapUnmanaged has no clone(), so we iterate manually
-    var new_fds: std.AutoHashMapUnmanaged(VirtualFD, FD) = .empty;
-    errdefer new_fds.deinit(self.allocator);
+    var new_open_files: std.AutoHashMapUnmanaged(VirtualFD, OpenFile) = .empty;
+    errdefer new_open_files.deinit(self.allocator);
 
-    var iter = self.fds.iterator();
+    var iter = self.open_files.iterator();
     while (iter.next()) |entry| {
-        try new_fds.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        try new_open_files.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     new.* = .{
         .ref_count = 1,
         .allocator = self.allocator,
-        .fds = new_fds,
+        .open_files = new_open_files,
         .next_vfd = self.next_vfd,
     };
     return new;
 }
 
-pub fn insert(self: *Self, vfd: VirtualFD, file: FD) !void {
-    try self.fds.put(self.allocator, vfd, file);
+pub fn insert(self: *Self, vfd: VirtualFD, file: OpenFile) !void {
+    try self.open_files.put(self.allocator, vfd, file);
 }
 
 /// Allocate a new virtual fd number, insert the file, and return the vfd
-pub fn open(self: *Self, file: FD) !VirtualFD {
+pub fn open(self: *Self, file: OpenFile) !VirtualFD {
     const vfd = self.next_vfd;
     self.next_vfd += 1;
-    try self.fds.put(self.allocator, vfd, file);
+    try self.open_files.put(self.allocator, vfd, file);
     return vfd;
 }
 
-pub fn get(self: *Self, vfd: VirtualFD) ?*FD {
-    return self.fds.getPtr(vfd);
+pub fn get(self: *Self, vfd: VirtualFD) ?*OpenFile {
+    return self.open_files.getPtr(vfd);
 }
 
 pub fn remove(self: *Self, vfd: VirtualFD) bool {
-    return self.fds.remove(vfd);
+    return self.open_files.remove(vfd);
 }
 
 const testing = std.testing;

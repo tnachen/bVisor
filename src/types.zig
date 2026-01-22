@@ -2,8 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 
-// Kernel File Descriptor
-pub const KernelFD = i32;
+pub const SupervisorFD = i32;
 
 pub fn LinuxResult(comptime T: type) type {
     return union(enum) {
@@ -40,7 +39,7 @@ pub fn LinuxResult(comptime T: type) type {
 pub const Logger = struct {
     pub const Name = enum {
         prefork,
-        child,
+        guest,
         supervisor,
     };
 
@@ -57,12 +56,12 @@ pub const Logger = struct {
         const fmtlog = std.fmt.bufPrint(&buf, format, args) catch unreachable;
         const color = switch (self.name) {
             .prefork => "\x1b[96m",
-            .child => "\x1b[92m",
+            .guest => "\x1b[92m",
             .supervisor => "\x1b[95m",
         };
         const padding: []const u8 = switch (self.name) {
             .prefork => "      ",
-            .child => "        ",
+            .guest => "        ",
             .supervisor => "   ",
         };
 

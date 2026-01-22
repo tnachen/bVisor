@@ -3,20 +3,20 @@ const linux = std.os.linux;
 
 const types = @import("../../../types.zig");
 const LinuxResult = types.LinuxResult;
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 
-pub const KernelPID = @import("../../../virtual/proc/Proc.zig").KernelPID;
+pub const SupervisorPID = @import("../../../virtual/proc/Proc.zig").SupervisorPID;
 pub const CloneFlags = @import("../../../virtual/proc/Procs.zig").CloneFlags;
 
 // kcmp types from linux/kcmp.h
 const KCMP_FILES: u5 = 2;
 
 /// Read parent PID from /proc/[pid]/status
-pub fn readPpid(pid: KernelPID) !KernelPID {
+pub fn readPpid(pid: SupervisorPID) !SupervisorPID {
     var path_buf: [32:0]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/status", .{pid}) catch unreachable;
 
-    const fd = try LinuxResult(KernelFD).from(
+    const fd = try LinuxResult(SupervisorFD).from(
         linux.open(path.ptr, .{ .ACCMODE = .RDONLY }, 0),
     ).unwrap();
     defer _ = linux.close(fd);
@@ -31,14 +31,14 @@ pub fn readPpid(pid: KernelPID) !KernelPID {
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "PPid:")) {
             const ppid_str = std.mem.trim(u8, line[5..], " \t");
-            return std.fmt.parseInt(KernelPID, ppid_str, 10) catch return error.ProcNotInKernel;
+            return std.fmt.parseInt(SupervisorPID, ppid_str, 10) catch return error.ProcNotInKernel;
         }
     }
     return error.ProcNotInKernel;
 }
 
 /// Detect clone flags by querying kernel state
-pub fn detectCloneFlags(parent_pid: KernelPID, child_pid: KernelPID) CloneFlags {
+pub fn detectCloneFlags(parent_pid: SupervisorPID, child_pid: SupervisorPID) CloneFlags {
     var flags: u64 = 0;
 
     // Check CLONE_NEWPID via namespace inode comparison
@@ -55,14 +55,14 @@ pub fn detectCloneFlags(parent_pid: KernelPID, child_pid: KernelPID) CloneFlags 
 }
 
 /// Check if two processes share the same PID namespace
-fn samePidNamespace(pid1: KernelPID, pid2: KernelPID) bool {
+fn samePidNamespace(pid1: SupervisorPID, pid2: SupervisorPID) bool {
     const ino1 = getNsInode(pid1, "pid") orelse return true;
     const ino2 = getNsInode(pid2, "pid") orelse return true;
     return ino1 == ino2;
 }
 
 /// Get namespace inode for a process
-fn getNsInode(pid: KernelPID, ns_type: []const u8) ?u64 {
+fn getNsInode(pid: SupervisorPID, ns_type: []const u8) ?u64 {
     var path_buf: [64:0]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/ns/{s}", .{ pid, ns_type }) catch return null;
 
@@ -79,7 +79,7 @@ fn getNsInode(pid: KernelPID, ns_type: []const u8) ?u64 {
 }
 
 /// Check if two processes share the same fd table using kcmp
-fn sharesFdTable(pid1: KernelPID, pid2: KernelPID) bool {
+fn sharesFdTable(pid1: SupervisorPID, pid2: SupervisorPID) bool {
     // kcmp returns: 0 = equal, positive = different, negative = error
     // Only 0 means they share the same fd table
     const result = linux.syscall5(

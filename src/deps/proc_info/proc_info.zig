@@ -5,7 +5,7 @@ const impl = if (builtin.is_test)
 else
     @import("impl/linux.zig");
 
-pub const KernelPID = @import("../../virtual/proc/Proc.zig").KernelPID;
+pub const SupervisorPID = @import("../../virtual/proc/Proc.zig").SupervisorPID;
 pub const CloneFlags = @import("../../virtual/proc/Procs.zig").CloneFlags;
 
 pub const readPpid = impl.readPpid;

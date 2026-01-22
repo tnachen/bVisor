@@ -4,5 +4,5 @@ const impl = if (builtin.is_test)
 else
     @import("impl/linux.zig");
 
-pub const lookupChildFd = impl.lookupChildFd;
-pub const lookupChildFdWithRetry = impl.lookupChildFdWithRetry;
+pub const lookupGuestFd = impl.lookupGuestFd;
+pub const lookupGuestFdWithRetry = impl.lookupGuestFdWithRetry;

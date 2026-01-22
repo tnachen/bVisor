@@ -8,9 +8,9 @@ const proc_info = deps.proc_info;
 pub const Proc = @import("Proc.zig");
 pub const Namespace = @import("Namespace.zig");
 pub const FdTable = @import("../fs/FdTable.zig");
-pub const KernelPID = Proc.KernelPID;
+pub const SupervisorPID = Proc.SupervisorPID;
 
-const ProcLookup = std.AutoHashMapUnmanaged(KernelPID, *Proc);
+const ProcLookup = std.AutoHashMapUnmanaged(SupervisorPID, *Proc);
 
 const Self = @This();
 
@@ -74,7 +74,7 @@ pub fn deinit(self: *Self) void {
 }
 
 /// Get a proc by kernel PID. Performs a kernel lookup for unknown children.
-pub fn get(self: *Self, pid: KernelPID) !*Proc {
+pub fn get(self: *Self, pid: SupervisorPID) !*Proc {
     // proc already in our tree
     if (self.lookup.get(pid)) |proc| return proc;
 
@@ -82,7 +82,7 @@ pub fn get(self: *Self, pid: KernelPID) !*Proc {
 
     // walk the kernel API until we hit a known process
     // note: must protect against escapes where init_pid is not in the lineage
-    var lineage: std.ArrayList(KernelPID) = try .initCapacity(self.allocator, 10);
+    var lineage: std.ArrayList(SupervisorPID) = try .initCapacity(self.allocator, 10);
     defer lineage.deinit(self.allocator);
 
     var child_pid = pid;
@@ -121,7 +121,7 @@ pub fn get(self: *Self, pid: KernelPID) !*Proc {
 }
 
 /// Register the initial sandbox root process
-pub fn handleInitialProcess(self: *Self, pid: KernelPID) !void {
+pub fn handleInitialProcess(self: *Self, pid: SupervisorPID) !void {
     if (self.lookup.count() != 0) return error.InitialProcessExists;
 
     // passing null namespace/fd_table creates new ones
@@ -132,7 +132,7 @@ pub fn handleInitialProcess(self: *Self, pid: KernelPID) !void {
 }
 
 /// Register a child process with given parent and flags
-pub fn registerChild(self: *Self, parent: *Proc, child_pid: KernelPID, clone_flags: CloneFlags) !*Proc {
+pub fn registerChild(self: *Self, parent: *Proc, child_pid: SupervisorPID, clone_flags: CloneFlags) !*Proc {
     try clone_flags.checkSupported();
 
     // CLONE_NEWPID creates a new PID namespace; otherwise inherit parent's
@@ -156,7 +156,7 @@ pub fn registerChild(self: *Self, parent: *Proc, child_pid: KernelPID, clone_fla
     return child;
 }
 
-pub fn handleProcessExit(self: *Self, pid: KernelPID) !void {
+pub fn handleProcessExit(self: *Self, pid: SupervisorPID) !void {
     const target_proc = self.lookup.get(pid) orelse return;
 
     // remove target from parent's children
@@ -329,7 +329,7 @@ test "deep nesting" {
     defer v_procs.deinit();
 
     // chain: a -> b -> c -> d -> e
-    var pids = [_]KernelPID{ 10, 20, 30, 40, 50 };
+    var pids = [_]SupervisorPID{ 10, 20, 30, 40, 50 };
 
     try v_procs.handleInitialProcess(pids[0]);
     for (1..5) |i| {
@@ -355,7 +355,7 @@ test "wide tree with many siblings" {
 
     // add 10 children
     for (1..11) |i| {
-        const child_pid: KernelPID = @intCast(100 + i);
+        const child_pid: SupervisorPID = @intCast(100 + i);
         _ = try v_procs.registerChild(parent, child_pid, CloneFlags.from(0));
     }
 

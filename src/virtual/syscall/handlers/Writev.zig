@@ -2,9 +2,11 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const KernelFD = types.KernelFD;
-const Result = @import("../syscall.zig").Syscall.Result;
+const SupervisorFD = types.SupervisorFD;
 const Supervisor = @import("../../../Supervisor.zig");
+const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
+const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 // comptime dependency injection
 const deps = @import("../../../deps/deps.zig");
@@ -14,71 +16,75 @@ const Self = @This();
 
 const MAX_IOV = 16;
 
-fd: KernelFD,
-iovec_ptr: u64,
-iovec_count: usize,
-// Store the iovec array and buffer data
-iovecs: [MAX_IOV]posix.iovec_const,
-// Total data to write (concatenated from all iovecs)
-data_buf: [4096]u8,
-data_len: usize,
-
-pub fn parse(notif: linux.SECCOMP.notif) !Self {
-    var self: Self = .{
-        .fd = @bitCast(@as(u32, @truncate(notif.data.arg0))),
-        .iovec_ptr = notif.data.arg1,
-        .iovec_count = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV),
-        .iovecs = undefined,
-        .data_buf = undefined,
-        .data_len = 0,
-    };
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+    const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
+    const iovec_ptr: u64 = notif.data.arg1;
+    const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
+    var iovecs: [MAX_IOV]posix.iovec_const = undefined;
+    var data_buf: [4096]u8 = undefined;
+    var data_len: usize = 0;
 
     // Read iovec array from child memory
-    for (0..self.iovec_count) |i| {
-        const iov_addr = self.iovec_ptr + i * @sizeOf(posix.iovec_const);
-        self.iovecs[i] = try memory_bridge.read(posix.iovec_const, @intCast(notif.pid), iov_addr);
+    for (0..iovec_count) |i| {
+        const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec_const);
+        iovecs[i] = memory_bridge.read(posix.iovec_const, @intCast(notif.pid), iov_addr) catch {
+            return replyErr(notif.id, .FAULT);
+        };
     }
 
     // Read buffer data from child memory for each iovec (one syscall per iovec)
-    for (0..self.iovec_count) |i| {
-        const iov = self.iovecs[i];
+    for (0..iovec_count) |i| {
+        const iov = iovecs[i];
         const buf_ptr = @intFromPtr(iov.base);
-        const buf_len = @min(iov.len, self.data_buf.len - self.data_len);
+        const buf_len = @min(iov.len, data_buf.len - data_len);
 
         if (buf_len > 0) {
-            const dest = self.data_buf[self.data_len..][0..buf_len];
-            try memory_bridge.readSlice(dest, @intCast(notif.pid), buf_ptr);
-            self.data_len += buf_len;
+            const dest = data_buf[data_len..][0..buf_len];
+            memory_bridge.readSlice(dest, @intCast(notif.pid), buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
+            data_len += buf_len;
         }
     }
 
-    return self;
-}
-
-pub fn handle(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
     // TODO: supervisor.fs
 
-    logger.log("Emulating writev: fd={d} iovec_count={d} total_bytes={d}", .{
-        self.fd,
-        self.iovec_count,
-        self.data_len,
-    });
-
     // Only handle stdout = stderr
-    const data = self.data_buf[0..self.data_len];
-    switch (self.fd) {
+    const data = data_buf[0..data_len];
+    switch (fd) {
         linux.STDOUT_FILENO => {
-            logger.log("stdout:\n\n{s}", .{std.mem.sliceTo(data, 0)});
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(supervisor.io, &stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            stdout.writeAll(data) catch {
+                logger.log("writev: error writing to stdout", .{});
+                return replyErr(notif.id, .IO);
+            };
+            stdout.flush() catch {
+                logger.log("writev: error flushing stdout", .{});
+                return replyErr(notif.id, .IO);
+            };
         },
         linux.STDERR_FILENO => {
-            logger.log("stderr:\n\n{s}", .{std.mem.sliceTo(data, 0)});
+            var stderr_buffer: [1024]u8 = undefined;
+            var stderr_writer = std.Io.File.stderr().writer(supervisor.io, &stderr_buffer);
+            const stderr = &stderr_writer.interface;
+            stderr.writeAll(data) catch {
+                logger.log("writev: error writing to stderr", .{});
+                return replyErr(notif.id, .IO);
+            };
+            stderr.flush() catch {
+                logger.log("writev: error flushing stderr", .{});
+                return replyErr(notif.id, .IO);
+            };
         },
         else => {
-            logger.log("writev: passthrough for non-stdout/stderr fd={d}", .{self.fd});
-            return .use_kernel;
+            // ERIK TODO
+            logger.log("writev to non-stdout/stderr fd={d} is not implemented", .{fd});
+            return replyErr(notif.id, .PERM);
         },
     }
 
-    return Result.replySuccess(@intCast(self.data_len));
+    return replySuccess(notif.id, @intCast(data_len));
 }

@@ -3,76 +3,57 @@ const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
 const Proc = @import("../../proc/Proc.zig");
-const FD = @import("../../fs/FD.zig").FD;
-const Result = @import("../syscall.zig").Syscall.Result;
+const OpenFile = @import("../../fs/OpenFile.zig").OpenFile;
+const openat = @import("openat.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
+const replyErr = @import("../../../seccomp/notif.zig").replyErr;
+const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const isError = @import("../../../seccomp/notif.zig").isError;
+const isContinue = @import("../../../seccomp/notif.zig").isContinue;
+const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 
 // comptime dependency injection
 const deps = @import("../../../deps/deps.zig");
 const memory_bridge = deps.memory_bridge;
 
-const Self = @This();
-
 const MAX_IOV = 16;
 
-kernel_pid: Proc.KernelPID,
-fd: i32, // virtual fd from child
-iovec_ptr: u64,
-iovec_count: usize,
-// Store the iovec array parsed from child memory
-iovecs: [MAX_IOV]posix.iovec,
-
-pub fn parse(notif: linux.SECCOMP.notif) !Self {
-    var self: Self = .{
-        .kernel_pid = @intCast(notif.pid),
-        .fd = @bitCast(@as(u32, @truncate(notif.data.arg0))),
-        .iovec_ptr = notif.data.arg1,
-        .iovec_count = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV),
-        .iovecs = undefined,
-    };
-
-    // Read iovec array from child memory
-    for (0..self.iovec_count) |i| {
-        const iov_addr = self.iovec_ptr + i * @sizeOf(posix.iovec);
-        self.iovecs[i] = try memory_bridge.read(posix.iovec, @intCast(notif.pid), iov_addr);
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+    const supervisor_pid: Proc.SupervisorPID = @intCast(notif.pid);
+    const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
+    const iovec_ptr: u64 = notif.data.arg1;
+    const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
+    var iovecs: [MAX_IOV]posix.iovec = undefined;
+    // read iovec array from child memory
+    var total_requested: usize = 0;
+    for (0..iovec_count) |i| {
+        const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec);
+        iovecs[i] = memory_bridge.read(posix.iovec, supervisor_pid, iov_addr) catch {
+            return replyErr(notif.id, .FAULT);
+        };
+        total_requested += iovecs[i].len;
     }
 
-    return self;
-}
-
-pub fn handle(self: Self, supervisor: *Supervisor) !Result {
     const logger = supervisor.logger;
 
-    // Calculate total bytes requested
-    var total_requested: usize = 0;
-    for (0..self.iovec_count) |i| {
-        total_requested += self.iovecs[i].len;
-    }
-
-    logger.log("Emulating readv: fd={d} iovec_count={d} total_bytes={d}", .{
-        self.fd,
-        self.iovec_count,
-        total_requested,
-    });
-
     // Handle stdin - passthrough to kernel
-    if (self.fd == linux.STDIN_FILENO) {
+    if (fd == linux.STDIN_FILENO) {
         logger.log("readv: passthrough for stdin", .{});
-        return .use_kernel;
+        return replyContinue(notif.id);
     }
 
     // Look up the calling process
-    const proc = supervisor.virtual_procs.get(self.kernel_pid) catch {
-        logger.log("readv: process not found for pid={d}", .{self.kernel_pid});
-        return Result.replyErr(.SRCH);
+    const proc = supervisor.guest_procs.get(supervisor_pid) catch {
+        logger.log("readv: process not found for pid={d}", .{supervisor_pid});
+        return replyErr(notif.id, .SRCH);
     };
 
     // Look up the virtual FD
-    const fd_ptr = proc.fd_table.get(self.fd) orelse {
-        logger.log("readv: EBADF for fd={d}", .{self.fd});
-        return Result.replyErr(.BADF);
+    const fd_ptr = proc.fd_table.get(fd) orelse {
+        logger.log("readv: EBADF for fd={d}", .{fd});
+        return replyErr(notif.id, .BADF);
     };
 
     // Read into a local buffer first
@@ -81,47 +62,47 @@ pub fn handle(self: Self, supervisor: *Supervisor) !Result {
 
     const n = fd_ptr.read(buf[0..read_count]) catch |err| {
         logger.log("readv: error reading from fd: {s}", .{@errorName(err)});
-        return Result.replyErr(.IO);
+        return replyErr(notif.id, .IO);
     };
 
     // Distribute the read data across the child's iovec buffers
     var bytes_written: usize = 0;
-    for (0..self.iovec_count) |i| {
+    for (0..iovec_count) |i| {
         if (bytes_written >= n) break;
 
-        const iov = self.iovecs[i];
+        const iov = iovecs[i];
         const buf_ptr = @intFromPtr(iov.base);
         const remaining = n - bytes_written;
         const to_write = @min(iov.len, remaining);
 
         if (to_write > 0) {
-            try memory_bridge.writeSlice(buf[bytes_written..][0..to_write], self.kernel_pid, buf_ptr);
+            memory_bridge.writeSlice(buf[bytes_written..][0..to_write], supervisor_pid, buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
             bytes_written += to_write;
         }
     }
 
-    logger.log("readv: read {d} bytes into {d} iovecs", .{ n, self.iovec_count });
-    return Result.replySuccess(@intCast(n));
+    logger.log("readv: read {d} bytes into {d} iovecs", .{ n, iovec_count });
+    return replySuccess(notif.id, @intCast(n));
 }
 
 test "readv from proc fd returns pid" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 200;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 200;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     // First open a /proc/self fd
-    const OpenAt = @import("OpenAt.zig");
     const open_notif = makeNotif(.openat, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
         .arg1 = @intFromPtr("/proc/self/status"),
         .arg2 = @intCast(@as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY }))),
     });
-    const open_parsed = try OpenAt.parse(open_notif);
-    const open_res = try open_parsed.handle(&supervisor);
-    try testing.expect(!open_res.isError());
-    const vfd: i32 = @intCast(open_res.reply.val);
+    const open_res = openat.handle(open_notif, &supervisor);
+    try testing.expect(!isError(open_res));
+    const vfd: i32 = @intCast(open_res.val);
 
     // Set up iovecs - split the read across multiple buffers
     var buf1: [2]u8 = undefined;
@@ -132,17 +113,16 @@ test "readv from proc fd returns pid" {
     };
 
     const read_notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = @bitCast(@as(u64, @intCast(vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,
     });
 
-    const read_parsed = try Self.parse(read_notif);
-    const read_res = try read_parsed.handle(&supervisor);
-    try testing.expect(!read_res.isError());
+    const read_res = handle(read_notif, &supervisor);
+    try testing.expect(!isError(read_res));
 
-    const n: usize = @intCast(read_res.reply.val);
+    const n: usize = @intCast(read_res.val);
     // The proc fd should return "200\n" (the pid) - 4 bytes
     try testing.expectEqual(@as(usize, 4), n);
     // First 2 bytes in buf1
@@ -153,8 +133,8 @@ test "readv from proc fd returns pid" {
 
 test "readv from invalid fd returns EBADF" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -163,22 +143,21 @@ test "readv from invalid fd returns EBADF" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = 999, // invalid fd
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,
     });
 
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res.isError());
-    try testing.expectEqual(linux.E.BADF, @as(linux.E, @enumFromInt(res.reply.errno)));
+    const res = handle(notif, &supervisor);
+    try testing.expect(isError(res));
+    try testing.expectEqual(-@as(i32, @intFromEnum(linux.E.BADF)), res.@"error");
 }
 
-test "readv from stdin returns use_kernel" {
+test "readv from stdin returns continue" {
     const allocator = testing.allocator;
-    const child_pid: Proc.KernelPID = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, child_pid);
+    const guest_pid: Proc.SupervisorPID = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, guest_pid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -187,13 +166,12 @@ test "readv from stdin returns use_kernel" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = child_pid,
+        .pid = guest_pid,
         .arg0 = linux.STDIN_FILENO,
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = iovecs.len,
     });
 
-    const parsed = try Self.parse(notif);
-    const res = try parsed.handle(&supervisor);
-    try testing.expect(res == .use_kernel);
+    const res = handle(notif, &supervisor);
+    try testing.expect(isContinue(res));
 }

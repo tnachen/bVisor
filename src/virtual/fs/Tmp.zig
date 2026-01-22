@@ -5,7 +5,7 @@ const linux = std.os.linux;
 const Io = std.Io;
 const Dir = Io.Dir;
 const types = @import("../../types.zig");
-const KernelFD = types.KernelFD;
+const SupervisorFD = types.SupervisorFD;
 
 const Self = @This();
 
@@ -37,7 +37,7 @@ fn relPath(tmp_path: []const u8) ![]const u8 {
     return if (after_tmp.len > 0 and after_tmp[0] == '/') after_tmp[1..] else after_tmp;
 }
 
-pub fn open(self: *const Self, io: Io, tmp_path: []const u8, flags: linux.O, mode: linux.mode_t) !KernelFD {
+pub fn open(self: *const Self, io: Io, tmp_path: []const u8, flags: linux.O, mode: linux.mode_t) !SupervisorFD {
     const rel_path = try relPath(tmp_path);
 
     var posix_flags: posix.O = .{};

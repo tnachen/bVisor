@@ -4,24 +4,24 @@ const posix = std.posix;
 const types = @import("../../types.zig");
 const Proc = @import("../proc/Proc.zig");
 
-const KernelPID = Proc.KernelPID;
+const SupervisorPID = Proc.SupervisorPID;
 
-/// Virtual file descriptor - represents a virtualized file.
-/// This is a tagged union representing different types of virtual files.
-pub const FD = union(enum) {
-    kernel: types.KernelFD, // supervisor maintains virtual FDs for every fd, for consistency
-    proc: ProcFD, // virtualized proc file
-    cow: CowFD, // copy-on-write file, created only if user requests more than read perms
+/// Backing for a virtual file descriptor entry in the fd table.
+/// Tagged union representing different types of open files.
+pub const OpenFile = union(enum) {
+    kernel: types.SupervisorFD, // supervisor maintains virtual FDs for every fd, for consistency
+    proc: ProcFile, // virtualized proc file
+    cow: CowFile, // copy-on-write file, created only if user requests more than read perms
 
     const Self = @This();
 
-    pub const ProcFD = union(enum) {
+    pub const ProcFile = union(enum) {
         self: struct {
-            pid: KernelPID,
+            pid: SupervisorPID,
             offset: usize = 0,
         },
 
-        pub fn read(self: *ProcFD, buf: []u8) usize {
+        pub fn read(self: *ProcFile, buf: []u8) usize {
             switch (self.*) {
                 .self => |*s| {
                     var tmp: [16]u8 = undefined;
@@ -38,18 +38,18 @@ pub const FD = union(enum) {
 
     /// Copy-on-write file descriptor.
     /// The backing_fd points to a file in the COW root directory.
-    pub const CowFD = struct {
-        backing_fd: types.KernelFD,
+    pub const CowFile = struct {
+        backing_fd: types.SupervisorFD,
 
-        pub fn read(self: *CowFD, buf: []u8) !usize {
+        pub fn read(self: *CowFile, buf: []u8) !usize {
             return posix.read(self.backing_fd, buf);
         }
 
-        pub fn write(self: *CowFD, data: []const u8) !usize {
+        pub fn write(self: *CowFile, data: []const u8) !usize {
             return posix.write(self.backing_fd, data);
         }
 
-        pub fn close(self: *CowFD) void {
+        pub fn close(self: *CowFile) void {
             posix.close(self.backing_fd);
         }
     };
@@ -84,15 +84,15 @@ pub const FD = union(enum) {
 
 const testing = std.testing;
 
-test "FD.ProcFD.self read returns pid" {
-    var proc_fd: FD.ProcFD = .{ .self = .{ .pid = 42 } };
+test "OpenFile.ProcFD.self read returns pid" {
+    var proc_fd: OpenFile.ProcFile = .{ .self = .{ .pid = 42 } };
     var buf: [16]u8 = undefined;
     const n = proc_fd.read(&buf);
     try testing.expectEqualStrings("42\n", buf[0..n]);
 }
 
-test "FD.ProcFD.self read tracks offset" {
-    var proc_fd: FD.ProcFD = .{ .self = .{ .pid = 123 } };
+test "OpenFile.ProcFD.self read tracks offset" {
+    var proc_fd: OpenFile.ProcFile = .{ .self = .{ .pid = 123 } };
     var buf: [2]u8 = undefined;
 
     const n1 = proc_fd.read(&buf);
@@ -107,8 +107,8 @@ test "FD.ProcFD.self read tracks offset" {
     try testing.expectEqual(0, n3);
 }
 
-test "FD union read dispatches to proc" {
-    var fd: FD = .{ .proc = .{ .self = .{ .pid = 7 } } };
+test "OpenFile union read dispatches to proc" {
+    var fd: OpenFile = .{ .proc = .{ .self = .{ .pid = 7 } } };
     var buf: [16]u8 = undefined;
     const n = try fd.read(&buf);
     try testing.expectEqualStrings("7\n", buf[0..n]);
