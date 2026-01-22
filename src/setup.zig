@@ -49,13 +49,13 @@ fn childProcess(socket: KernelFD, runnable: *const fn (io: std.Io) void) !void {
 
     // Predict notify FD and send to supervisor before installing seccomp
     // (can't send after since socket write would be intercepted)
+    // Don't close socket until after install() so fd numbers stay stable
     const predicted_fd = try seccomp.predictNotifyFd();
     try sendFd(socket, predicted_fd);
-    try posix.fdatasync(socket); // block until write completes. TODO ERIK check if necessary. is according to posix.close
-    posix.close(socket);
 
     logger.log("Entering seccomp mode", .{});
     const notify_fd = try seccomp.install();
+    posix.close(socket);
 
     if (notify_fd != predicted_fd) {
         return error.NotifyFdPredictionFailed;
@@ -81,7 +81,6 @@ fn supervisorProcess(socket: KernelFD, child_pid: linux.pid_t) !void {
 
     // Receive predicted notify FD from child
     const child_notify_fd = try recvFd(socket);
-    try posix.fdatasync(socket); // block until write completes. TODO ERIK check if necessary. is according to posix.close
     posix.close(socket);
 
     // Get actual notify FD by looking up child's FD table

@@ -25,8 +25,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     const logger = supervisor.logger;
 
-    logger.log("Emulating read: fd={d} count={d}", .{ fd, count });
-
     // Handle stdin - passthrough to kernel
     if (fd == linux.STDIN_FILENO) {
         logger.log("read: passthrough for stdin", .{});
@@ -55,7 +53,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     };
 
     if (n > 0) {
-        try memory_bridge.writeSlice(buf[0..n], kernel_pid, buf_ptr);
+        memory_bridge.writeSlice(buf[0..n], kernel_pid, buf_ptr) catch {
+            return replyErr(notif.id, .FAULT);
+        };
     }
 
     logger.log("read: read {d} bytes", .{n});

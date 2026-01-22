@@ -22,22 +22,24 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const count: usize = @truncate(notif.data.arg2);
     const logger = supervisor.logger;
 
-    logger.log("Emulating write: fd={d} count={d}", .{ fd, count });
-
     // Handle stdout/stderr - log and return success (like writev)
     // ERIK TODO: make less ugly
     switch (fd) {
         linux.STDOUT_FILENO => {
             var buf: [4096]u8 = undefined;
             const read_count = @min(count, buf.len);
-            try memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr);
+            memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
             logger.log("stdout:\n\n{s}", .{std.mem.sliceTo(buf[0..read_count], 0)});
             return replySuccess(notif.id, @intCast(read_count));
         },
         linux.STDERR_FILENO => {
             var buf: [4096]u8 = undefined;
             const read_count = @min(count, buf.len);
-            try memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr);
+            memory_bridge.readSlice(buf[0..read_count], kernel_pid, buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
             logger.log("stderr:\n\n{s}", .{std.mem.sliceTo(buf[0..read_count], 0)});
             return replySuccess(notif.id, @intCast(read_count));
         },
@@ -59,7 +61,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Write up to min(count, 4096) - short writes are valid POSIX behavior
     var buf: [4096]u8 = undefined;
     const write_size = @min(count, buf.len);
-    try memory_bridge.readSlice(buf[0..write_size], kernel_pid, buf_ptr);
+    memory_bridge.readSlice(buf[0..write_size], kernel_pid, buf_ptr) catch {
+        return replyErr(notif.id, .FAULT);
+    };
 
     const n = fd_ptr.write(buf[0..write_size]) catch |err| {
         logger.log("write: error writing to fd: {s}", .{@errorName(err)});

@@ -6,6 +6,7 @@ const KernelFD = types.KernelFD;
 const Supervisor = @import("../../../Supervisor.zig");
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 // comptime dependency injection
 const deps = @import("../../../deps/deps.zig");
@@ -20,13 +21,15 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
     var iovecs: [MAX_IOV]posix.iovec_const = undefined;
-    const data_buf: [4096]u8 = undefined;
+    var data_buf: [4096]u8 = undefined;
     var data_len: usize = 0;
 
     // Read iovec array from child memory
     for (0..iovec_count) |i| {
         const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec_const);
-        iovecs[i] = try memory_bridge.read(posix.iovec_const, @intCast(notif.pid), iov_addr);
+        iovecs[i] = memory_bridge.read(posix.iovec_const, @intCast(notif.pid), iov_addr) catch {
+            return replyErr(notif.id, .FAULT);
+        };
     }
 
     // Read buffer data from child memory for each iovec (one syscall per iovec)
@@ -37,7 +40,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         if (buf_len > 0) {
             const dest = data_buf[data_len..][0..buf_len];
-            try memory_bridge.readSlice(dest, @intCast(notif.pid), buf_ptr);
+            memory_bridge.readSlice(dest, @intCast(notif.pid), buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
             data_len += buf_len;
         }
     }
@@ -45,24 +50,31 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const logger = supervisor.logger;
     // TODO: supervisor.fs
 
-    logger.log("Emulating writev: fd={d} iovec_count={d} total_bytes={d}", .{
-        notif.data.arg0,
-        iovec_count,
-        notif.data.arg2,
-    });
-
     // Only handle stdout = stderr
     const data = data_buf[0..data_len];
     switch (fd) {
         linux.STDOUT_FILENO => {
-            logger.log("stdout:\n\n{s}", .{std.mem.sliceTo(data, 0)});
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(supervisor.io, &stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            stdout.writeAll(data) catch {
+                logger.log("writev: error writing to stdout", .{});
+                return replyErr(notif.id, .IO);
+            };
         },
         linux.STDERR_FILENO => {
-            logger.log("stderr:\n\n{s}", .{std.mem.sliceTo(data, 0)});
+            var stderr_buffer: [1024]u8 = undefined;
+            var stderr_writer = std.Io.File.stderr().writer(supervisor.io, &stderr_buffer);
+            const stderr = &stderr_writer.interface;
+            stderr.writeAll(data) catch {
+                logger.log("writev: error writing to stderr", .{});
+                return replyErr(notif.id, .IO);
+            };
         },
         else => {
-            logger.log("writev: passthrough for non-stdout/stderr fd={d}", .{fd});
-            return replyContinue(notif.id);
+            // ERIK TODO
+            logger.log("writev to non-stdout/stderr fd={d} is not implemented", .{fd});
+            return replyErr(notif.id, .PERM);
         },
     }
 

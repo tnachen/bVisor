@@ -207,33 +207,22 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
     const mode: linux.mode_t = @truncate(notif.data.arg3);
 
-    logger.log("Emulating openat: dirfd={d} path={s} flags={any}", .{
-        dirfd,
-        path_slice,
-        flags,
-    });
-
     const action = resolve(path_slice) catch |err| {
         logger.log("openat: path resolution failed: {}", .{err});
         return replyErr(notif.id, .NAMETOOLONG);
     };
 
-    logger.log("Action: {s}", .{@tagName(action)});
     switch (action) {
         .block => {
-            logger.log("openat: blocked path: {s}", .{path_slice});
             return replyErr(notif.id, .PERM);
         },
         .allow => {
-            logger.log("openat: allowed path: {s}", .{path_slice});
             return handleAllow(notif.id, kernel_pid, dirfd, path_slice, flags, mode, supervisor);
         },
         .virtualize_proc => {
-            logger.log("openat: virtualizing proc path: {s}", .{path_slice});
             return handleVirtualizeProc(notif.id, kernel_pid, path_slice, supervisor);
         },
         .virtualize_tmp => {
-            logger.log("openat: virtualizing tmp path: {s}", .{path_slice});
             return handleVirtualizeTmp(notif.id, kernel_pid, path_slice, flags, mode, supervisor);
         },
     }
@@ -285,8 +274,6 @@ fn handleVirtualizeProc(
         return replyErr(notif_id, .MFILE);
     };
 
-    logger.log("openat: opened virtual fd={d}", .{vfd});
-
     return replySuccess(notif_id, @intCast(vfd));
 }
 
@@ -317,8 +304,6 @@ fn handleVirtualizeTmp(
         logger.log("openat: fd_table open failed: {}", .{err});
         return replyErr(notif_id, .MFILE);
     };
-
-    logger.log("openat: opened private tmp fd={d} as vfd={d}", .{ tmp_fd, vfd });
 
     return replySuccess(notif_id, @intCast(vfd));
 }

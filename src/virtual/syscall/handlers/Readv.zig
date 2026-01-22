@@ -30,17 +30,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var total_requested: usize = 0;
     for (0..iovec_count) |i| {
         const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec);
-        iovecs[i] = try memory_bridge.read(posix.iovec, kernel_pid, iov_addr);
+        iovecs[i] = memory_bridge.read(posix.iovec, kernel_pid, iov_addr) catch {
+            return replyErr(notif.id, .FAULT);
+        };
         total_requested += iovecs[i].len;
     }
 
     const logger = supervisor.logger;
-
-    logger.log("Emulating readv: fd={d} iovec_count={d} total_bytes={d}", .{
-        fd,
-        iovec_count,
-        total_requested,
-    });
 
     // Handle stdin - passthrough to kernel
     if (fd == linux.STDIN_FILENO) {
@@ -80,7 +76,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         const to_write = @min(iov.len, remaining);
 
         if (to_write > 0) {
-            try memory_bridge.writeSlice(buf[bytes_written..][0..to_write], kernel_pid, buf_ptr);
+            memory_bridge.writeSlice(buf[bytes_written..][0..to_write], kernel_pid, buf_ptr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
             bytes_written += to_write;
         }
     }

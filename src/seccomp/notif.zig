@@ -1,5 +1,8 @@
 const std = @import("std");
 const linux = std.os.linux;
+const Logger = @import("../types.zig").Logger;
+
+const supervisor_logger = Logger.init(.supervisor);
 
 /// Convenience function for creating synthetic notifs for testing
 pub fn makeNotif(syscall_nr: linux.SYS, args: struct {
@@ -21,7 +24,7 @@ pub fn makeNotif(syscall_nr: linux.SYS, args: struct {
 }
 
 pub fn replyContinue(id: u64) linux.SECCOMP.notif_resp {
-    std.debug.print("Continuing syscall\n", .{});
+    supervisor_logger.log("Continue", .{});
     return .{
         .id = id,
         .flags = linux.SECCOMP.USER_NOTIF_FLAG_CONTINUE,
@@ -31,7 +34,7 @@ pub fn replyContinue(id: u64) linux.SECCOMP.notif_resp {
 }
 
 pub fn replySuccess(id: u64, val: i64) linux.SECCOMP.notif_resp {
-    std.debug.print("Success: {d}\n", .{val});
+    supervisor_logger.log("Success: {d}", .{val});
     return .{
         .id = id,
         .flags = 0,
@@ -41,7 +44,7 @@ pub fn replySuccess(id: u64, val: i64) linux.SECCOMP.notif_resp {
 }
 
 pub fn replyErr(id: u64, err: linux.E) linux.SECCOMP.notif_resp {
-    std.debug.print("Error: {s}\n", .{@tagName(err)});
+    supervisor_logger.log("Error: {s}", .{@tagName(err)});
     return .{
         .id = id,
         .flags = 0,
