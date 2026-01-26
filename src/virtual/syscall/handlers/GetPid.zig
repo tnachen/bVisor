@@ -70,9 +70,10 @@ test "getpid from immediate child in new namespace returns namespace-local PID" 
     _ = try supervisor.guest_procs.registerChild(parent, guest_pid, Procs.CloneFlags.from(linux.CLONE.NEWPID));
 
     // Child calls getpid
-    const notif = makeNotif(.getpid, .{ .pid = guest_pid }); // seccomp always uses SupervisorPID, besides in arguments to the syscall
-    const resp = handle(notif, &supervisor); // SHOULD return type GuestPID. But, right now, it's returned as SupervisorPID
+    const notif = makeNotif(.getpid, .{ .pid = guest_pid });
+    const resp = handle(notif, &supervisor);
     try testing.expect(!isError(resp));
+    try testing.expectEqual(1, resp.val);
     // Child's guestPID should (almost certainly) not match the SupervisorPID for that guest process (e.g., 1)
     try testing.expect(guest_pid != resp.val);
 }

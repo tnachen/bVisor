@@ -84,7 +84,7 @@ src/
 
 **FD handling**: Uses virtual FD abstraction with `OpenFile` union enum:
 - `.kernel` - passthrough to real kernel FD (from the perspective of the supervisor)
-- `.proc` - virtualized `src//proc` files (e.g., `src/proc/self` returns guest PID)
+- `.proc` - virtualized `/proc` files (e.g., `/proc/self` returns guest PID)
 - `.cow` - copy-on-write files (not yet implemented)
 - FDs 0,1,2 (stdin/stdout/stderr) are handled specially
 
@@ -140,7 +140,7 @@ test {
 - `process_vm_readv`/`process_vm_writev` for cross-process memory
 - `pidfd_open`/`pidfd_getfd` for FD operations across processes
 
-**Preference**: Use `pidfd_getfd` to access child FDs rather than `src/proc/pid/fd` symlinks. This is more reliable and doesn't require filesystem access.
+**Preference**: Use `pidfd_getfd` to access child FDs rather than `proc/pid/fd` symlinks. This is more reliable and doesn't require filesystem access.
 
 ## Zig Guidelines
 - Zig 0.16 is required, and includes a new `std.Io` module that provides a unified interface for asynchronous I/O.

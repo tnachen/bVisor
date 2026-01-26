@@ -24,10 +24,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const caller = supervisor.guest_procs.get(caller_pid) catch
         return replyErr(notif.id, .SRCH);
 
-    // TODO ERIK get target via namespace reference frame of the caller, not from guest_procs
-    // really: const target = caller.namespace.ProcMap.get(target_pid : guestPID) : *Proc
-    // then use target.pid : supervisorPID
-    const target = supervisor.guest_procs.get(target_pid) catch
+    const target = caller.namespace.procs.get(target_pid) orelse
         return replyErr(notif.id, .SRCH);
 
     // Caller must be able to see target
