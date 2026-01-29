@@ -10,9 +10,8 @@ const Proc = @import("../../../virtual/proc/Proc.zig");
 const Procs = @import("../../../virtual/proc/Procs.zig");
 pub const AbsPid = Proc.AbsPid;
 pub const NsPid = Proc.NsPid;
-const proc_status = @import("../../../virtual/proc/ProcStatus.zig");
-pub const ProcStatus = proc_status.ProcStatus;
-const MAX_NS_DEPTH = proc_status.MAX_NS_DEPTH;
+const ProcStatus = @import("../../../virtual/proc/ProcStatus.zig");
+const MAX_NS_DEPTH = ProcStatus.MAX_NS_DEPTH;
 pub const CloneFlags = @import("../../../virtual/proc/Procs.zig").CloneFlags;
 
 // kcmp types from linux/kcmp.h

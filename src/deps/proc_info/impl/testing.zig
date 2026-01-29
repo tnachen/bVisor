@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 const Proc = @import("../../../virtual/proc/Proc.zig");
 pub const AbsPid = Proc.AbsPid;
 pub const NsPid = Proc.NsPid;
-pub const ProcStatus = @import("../../..//virtual/proc/ProcStatus.zig").ProcStatus;
+pub const ProcStatus = @import("../../..//virtual/proc/ProcStatus.zig");
 pub const CloneFlags = @import("../../../virtual/proc/Procs.zig").CloneFlags;
 
 /// Max depth of namespace hierarchy for mock NsPids

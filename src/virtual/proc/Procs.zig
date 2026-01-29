@@ -11,7 +11,7 @@ pub const Namespace = @import("Namespace.zig");
 pub const FdTable = @import("../fs/FdTable.zig");
 pub const AbsPid = Proc.AbsPid;
 pub const NsPid = Proc.NsPid;
-pub const ProcStatus = @import("ProcStatus.zig").ProcStatus;
+pub const ProcStatus = @import("ProcStatus.zig");
 pub const detectCloneFlags = proc_info.detectCloneFlags;
 pub const getStatus = proc_info.getStatus;
 pub const listPids = proc_info.listPids;
@@ -100,6 +100,8 @@ fn ensureRegistered(
 
     // Ensure parent is registered first (recursive call)
     if (!self.lookup.contains(ppid)) {
+        // Stop recursion if we've reached init or outside sandbox
+        if (ppid <= 1) return error.ProcNotInSandbox;
         try self.ensureRegistered(status_map, ppid);
     }
 

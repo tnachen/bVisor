@@ -9,14 +9,11 @@ const Self = @This();
 
 pub const MAX_NS_DEPTH = 128;
 
-/// A ProcStatus is generated when reading from /proc/[pid]/status
-pub const ProcStatus = struct {
-    pid: AbsPid,
-    ppid: AbsPid,
-    nspids_buf: [MAX_NS_DEPTH]NsPid = undefined,
-    nspids_len: usize = 0,
+pid: AbsPid,
+ppid: AbsPid,
+nspids_buf: [MAX_NS_DEPTH]NsPid = undefined,
+nspids_len: usize = 0,
 
-    pub fn nspids(self: *const ProcStatus) []const NsPid {
-        return self.nspids_buf[0..self.nspids_len];
-    }
-};
+pub fn nspids(self: *const Self) []const NsPid {
+    return self.nspids_buf[0..self.nspids_len];
+}

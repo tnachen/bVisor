@@ -15,7 +15,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const caller_pid: AbsPid = @intCast(notif.pid);
 
     // Sync supervisor's procs with the kernel
-    supervisor.guest_procs.syncNewProcs() catch {};
+    supervisor.guest_procs.syncNewProcs() catch |err| {
+        std.log.warn("getpid: syncNewProcs failed: {}", .{err});
+    };
 
     const caller_proc = supervisor.guest_procs.get(caller_pid) catch |err| {
         // getppid() never fails in the kernel - if we can't find the process,
