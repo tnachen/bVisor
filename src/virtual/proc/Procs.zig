@@ -85,26 +85,6 @@ pub fn get(self: *Self, pid: SupervisorPID) !*Proc {
     return error.ProcNotRegistered;
 }
 
-/// Check if pid's ancestry includes the supervisor process
-fn isSandboxed(
-    self: *Self,
-    status_map: *std.AutoHashMap(SupervisorPID, ProcStatus),
-    pid: SupervisorPID,
-) bool {
-    var current = pid;
-    // Walk up parent chain with cycle detection
-    var steps: usize = 0;
-    while (steps < 1000) : (steps += 1) {
-        // If we hit a registered process, it's in the sandbox
-        if (self.lookup.contains(current)) return true;
-
-        // Get parent from status_map
-        const status = status_map.get(current) orelse return false;
-        current = status.ppid;
-    }
-    return false;
-}
-
 /// Recursive lazy registration of processes if necessary
 fn ensureRegistered(
     self: *Self,
@@ -154,12 +134,7 @@ pub fn syncNewProcs(
     // Try to register all PIDs (ancestors before descendants)
     var iter = status_map.keyIterator();
     while (iter.next()) |pid_ptr| {
-        const pid = pid_ptr.*;
-
-        // Skip processes not descended from the supervisor
-        if (!self.isSandboxed(&status_map, pid)) continue;
-
-        self.ensureRegistered(&status_map, pid) catch continue;
+        self.ensureRegistered(&status_map, pid_ptr.*) catch continue;
     }
 
     // TODO?: processes that no longer exist in the kernel should be deleted
@@ -892,65 +867,6 @@ test "stress: verify GuestPID mapping correctness across namespaces" {
     try std.testing.expectEqual(grandchild, found_grandchild);
 }
 
-// ============================================================================
-// isSandboxed and ensureRegistered Tests
-// ============================================================================
-
-test "isSandboxed returns true for descendants of registered process" {
-    const allocator = std.testing.allocator;
-    var v_procs = Self.init(allocator);
-    defer v_procs.deinit();
-    defer proc_info.testing.reset(allocator);
-
-    // Register initial process 100
-    try v_procs.handleInitialProcess(100);
-
-    // Build a status_map with chain: 300 -> 200 -> 100
-    var status_map = std.AutoHashMap(SupervisorPID, ProcStatus).init(allocator);
-    defer status_map.deinit();
-
-    try proc_info.testing.setupParent(allocator, 200, 100);
-    try proc_info.testing.setupParent(allocator, 300, 200);
-
-    const status_200 = try getStatus(200);
-    const status_300 = try getStatus(300);
-    try status_map.put(200, status_200);
-    try status_map.put(300, status_300);
-
-    // 300 descends from registered 100, so it's sandboxed
-    try std.testing.expect(v_procs.isSandboxed(&status_map, 300));
-    // 200 descends from registered 100, so it's sandboxed
-    try std.testing.expect(v_procs.isSandboxed(&status_map, 200));
-    // 100 is already registered, so it's sandboxed
-    try std.testing.expect(v_procs.isSandboxed(&status_map, 100));
-}
-
-test "isSandboxed returns false for process outside sandbox" {
-    const allocator = std.testing.allocator;
-    var v_procs = Self.init(allocator);
-    defer v_procs.deinit();
-    defer proc_info.testing.reset(allocator);
-
-    // Register initial process 100
-    try v_procs.handleInitialProcess(100);
-
-    // Build a status_map with chain: 300 -> 200 -> 999 (not in sandbox)
-    var status_map = std.AutoHashMap(SupervisorPID, ProcStatus).init(allocator);
-    defer status_map.deinit();
-
-    try proc_info.testing.setupParent(allocator, 300, 200);
-    try proc_info.testing.setupParent(allocator, 200, 999);
-    // 999 has no parent setup, so getStatus will fail or return something outside sandbox
-
-    const status_200 = try getStatus(200);
-    const status_300 = try getStatus(300);
-    try status_map.put(200, status_200);
-    try status_map.put(300, status_300);
-
-    // 300's chain goes to 999 which isn't registered or in status_map
-    try std.testing.expect(!v_procs.isSandboxed(&status_map, 300));
-}
-
 test "ensureRegistered registers process and ancestors" {
     const allocator = std.testing.allocator;
     var v_procs = Self.init(allocator);
@@ -973,7 +889,7 @@ test "ensureRegistered registers process and ancestors" {
     try status_map.put(200, status_200);
     try status_map.put(300, status_300);
 
-    // Register 300 - should also register 200
+    // Register 300 should also register 200
     try v_procs.ensureRegistered(&status_map, 300);
 
     try std.testing.expectEqual(3, v_procs.lookup.count());
@@ -981,7 +897,7 @@ test "ensureRegistered registers process and ancestors" {
     try std.testing.expect(v_procs.lookup.get(200) != null);
     try std.testing.expect(v_procs.lookup.get(300) != null);
 
-    // Verify parent-child relationships
+    // Verify parental relationships
     const proc_100 = v_procs.lookup.get(100).?;
     const proc_200 = v_procs.lookup.get(200).?;
     const proc_300 = v_procs.lookup.get(300).?;
@@ -1016,7 +932,7 @@ test "ensureRegistered fails for process not in status_map" {
 
     var status_map = std.AutoHashMap(SupervisorPID, ProcStatus).init(allocator);
     defer status_map.deinit();
-    // status_map is empty - 200 not in it
+    // status_map is empty, 200 not in it
 
     try std.testing.expectError(error.ProcNotInKernel, v_procs.ensureRegistered(&status_map, 200));
 }
