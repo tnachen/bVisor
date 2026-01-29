@@ -35,7 +35,7 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: SupervisorFD, init_guest_pi
 
     const uid = generateUid();
     var overlay = try OverlayRoot.init(io, uid);
-    errdefer overlay.deinit(io);
+    errdefer overlay.deinit();
 
     return .{
         .allocator = allocator,
@@ -63,7 +63,7 @@ pub fn deinit(self: *Self) void {
         posix.close(self.notify_fd);
     }
     self.guest_procs.deinit();
-    self.overlay.deinit(self.io);
+    self.overlay.deinit();
 }
 
 /// Main notification loop. Reads syscall notifications from the kernel,

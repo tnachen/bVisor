@@ -94,29 +94,25 @@ test "insert returns incrementing vfds starting at 3" {
     const table = try Self.init(testing.allocator);
     defer table.unref();
 
-    const file1 = File{ .proc = .{ .guest_pid = 1, .offset = 0 } };
-    const file2 = File{ .proc = .{ .guest_pid = 2, .offset = 0 } };
-    const file3 = File{ .proc = .{ .guest_pid = 3, .offset = 0 } };
-
-    const vfd1 = try table.insert(file1);
-    const vfd2 = try table.insert(file2);
-    const vfd3 = try table.insert(file3);
-
-    try testing.expectEqual(@as(VirtualFD, 3), vfd1);
-    try testing.expectEqual(@as(VirtualFD, 4), vfd2);
-    try testing.expectEqual(@as(VirtualFD, 5), vfd3);
+    for (0..10) |i| {
+        const actual_fd: posix.fd_t = @intCast(100 + i);
+        const expected_virtual_fd: VirtualFD = @intCast(3 + i);
+        const file = File{ .passthrough = .{ .fd = actual_fd } };
+        const vfd = try table.insert(file);
+        try testing.expectEqual(expected_virtual_fd, vfd);
+    }
 }
 
 test "get returns pointer to file" {
     const table = try Self.init(testing.allocator);
     defer table.unref();
 
-    const file = File{ .proc = .{ .guest_pid = 42, .offset = 0 } };
+    const file = File{ .passthrough = .{ .fd = 42 } };
     const vfd = try table.insert(file);
 
     const retrieved = table.get(vfd);
     try testing.expect(retrieved != null);
-    try testing.expectEqual(@as(i32, 42), retrieved.?.proc.guest_pid);
+    try testing.expectEqual(@as(i32, 42), retrieved.?.passthrough.fd);
 }
 
 test "get on missing vfd returns null" {
@@ -131,7 +127,7 @@ test "remove returns true for existing vfd" {
     const table = try Self.init(testing.allocator);
     defer table.unref();
 
-    const file = File{ .proc = .{ .guest_pid = 1, .offset = 0 } };
+    const file = File{ .passthrough = .{ .fd = 100 } };
     const vfd = try table.insert(file);
 
     const removed = table.remove(vfd);
@@ -156,7 +152,7 @@ test "CLONE_FILES scenario: shared table, changes visible to both" {
     defer shared.unref();
 
     // Insert via original
-    const file = File{ .proc = .{ .guest_pid = 1, .offset = 0 } };
+    const file = File{ .passthrough = .{ .fd = 100 } };
     const vfd = try table.insert(file);
 
     // Should be visible via shared reference
@@ -175,7 +171,7 @@ test "CLONE_FILES not set: cloned table, changes independent" {
     defer original.unref();
 
     // Insert a file into original
-    const file = File{ .proc = .{ .guest_pid = 1, .offset = 0 } };
+    const file = File{ .passthrough = .{ .fd = 100 } };
     const vfd = try original.insert(file);
 
     // Clone the table (simulates fork without CLONE_FILES)
@@ -192,7 +188,7 @@ test "CLONE_FILES not set: cloned table, changes independent" {
     try testing.expect(cloned.get(vfd) == null);
 
     // Insert into original - should not affect cloned
-    const file2 = File{ .proc = .{ .guest_pid = 2, .offset = 0 } };
+    const file2 = File{ .passthrough = .{ .fd = 101 } };
     const vfd2 = try original.insert(file2);
     try testing.expect(original.get(vfd2) != null);
     try testing.expect(cloned.get(vfd2) == null);
