@@ -72,9 +72,7 @@ fn copyFile(src: []const u8, dst: []const u8) !void {
 }
 
 const testing = std.testing;
-const builtin = @import("builtin");
-
-const ls_path = if (builtin.os.tag == .linux) "/usr/bin/ls" else "/bin/ls";
+const ls_path = "/bin/ls";
 
 test "opening /usr/bin/ls opens in readthrough mode" {
     const io = testing.io;
