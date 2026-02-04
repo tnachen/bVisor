@@ -1,5 +1,5 @@
 import { External } from "./napi";
-import { libBvisor } from "./libBvisor";
+import { native } from "./native";
 
 class Stream {
   private ptr: External<"Stream">;
@@ -13,7 +13,7 @@ class Stream {
     return new ReadableStream({
       async pull(controller) {
         // TODO: make streamNext return a promise
-        const chunk = libBvisor.streamNext(self.ptr);
+        const chunk = native.streamNext(self.ptr);
         if (chunk) {
           controller.enqueue(chunk);
         } else {
@@ -28,11 +28,11 @@ export class Sandbox {
   private ptr: External<"Sandbox">;
 
   constructor() {
-    this.ptr = libBvisor.createSandbox();
+    this.ptr = native.createSandbox();
   }
 
   runCmd(command: string) {
-    const result = libBvisor.sandboxRunCmd(this.ptr, command);
+    const result = native.sandboxRunCmd(this.ptr, command);
     return createOutput(
       new Stream(result.stdout).toReadableStream(),
       new Stream(result.stderr).toReadableStream()

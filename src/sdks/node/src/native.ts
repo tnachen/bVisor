@@ -6,7 +6,7 @@ if (platform() !== "linux") {
 }
 
 /** FFI contract: typed interface for the native Zig module loaded via require(). */
-export interface LibBvisorModule {
+export interface NativeModule {
   createSandbox(): External<"Sandbox">;
   sandboxRunCmd(
     sandbox: External<"Sandbox">,
@@ -18,4 +18,4 @@ export interface LibBvisorModule {
   streamNext(stream: External<"Stream">): Uint8Array | null;
 }
 
-export const libBvisor: LibBvisorModule = require(`@bvisor/linux-${arch()}`);
+export const native: NativeModule = require(`@bvisor/linux-${arch()}`);

@@ -21,7 +21,7 @@ src/sdks/node/
 
 ## FFI boundary
 
-`src/libBvisor.ts` is the single source of truth for the Zig-TS contract. When adding a new native function: add it to the `LibBvisorModule` interface in `libBvisor.ts`, implement in Zig.
+`src/native.ts` is the single source of truth for the Zig-TS contract. When adding a new native function: add it to the `NativeModule` interface in `native.ts`, implement in Zig.
 
 Opaque handles use `External<T>` (defined in `napi.ts`) on the TS side. On the Zig side, `ZigExternal(T)` in `zig/napi.zig` handles wrapping/unwrapping — all JS-facing values are plain `c.napi_value`.
 
