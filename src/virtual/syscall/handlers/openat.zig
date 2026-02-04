@@ -1,7 +1,8 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
-const Proc = @import("../../proc/Proc.zig");
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/file.zig").File;
 const Passthrough = @import("../../fs/backend/passthrough.zig").Passthrough;
 const Cow = @import("../../fs/backend/cow.zig").Cow;
@@ -20,17 +21,20 @@ const memory_bridge = deps.memory_bridge;
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
-    const caller_pid: Proc.AbsPid = @intCast(notif.pid);
+    // Parse args
+    const caller_tid: AbsTid = @intCast(notif.pid);
 
-    const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-        logger.log("openat: process not found for pid={d}: {}", .{ caller_pid, err });
+    // Get caller Thread
+    const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+        logger.log("openat: Thread not found with tid={d}: {}", .{ caller_tid, err });
         return replyErr(notif.id, .SRCH);
     };
+    std.debug.assert(caller.tid != caller_tid);
 
     // Read path from caller's memory
     const path_ptr: u64 = notif.data.arg1;
     var path_buf: [256]u8 = undefined;
-    const path = memory_bridge.readString(&path_buf, caller_pid, path_ptr) catch |err| {
+    const path = memory_bridge.readString(&path_buf, caller_tid, path_ptr) catch |err| {
         logger.log("openat: failed to read path string: {}", .{err});
         return replyErr(notif.id, .FAULT);
     };
@@ -61,10 +65,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             const mode: posix.mode_t = @truncate(notif.data.arg3);
 
             // Special case: if we're in the /proc filepath
-            // We need to sync guest_procs with the kernel to ensure all current PIDs are registered
+            // We need to sync guest_threads with the kernel to ensure all current PIDs are registered
             if (backend == .proc) {
-                supervisor.guest_procs.syncNewProcs() catch |err| {
-                    logger.log("openat: syncNewProcs failed: {}", .{err});
+                supervisor.guest_threads.syncNewThreads() catch |err| {
+                    logger.log("openat: syncNewThreads failed: {}", .{err});
                     return replyErr(notif.id, .NOSYS);
                 };
             }
@@ -132,7 +136,7 @@ const isError = @import("../../../seccomp/notif.zig").isError;
 const isContinue = @import("../../../seccomp/notif.zig").isContinue;
 const FdTable = @import("../../fs/FdTable.zig");
 
-fn makeOpenatNotif(pid: Proc.AbsPid, path: [*:0]const u8, flags: u32, mode: u32) linux.SECCOMP.notif {
+fn makeOpenatNotif(pid: AbsTid, path: [*:0]const u8, flags: u32, mode: u32) linux.SECCOMP.notif {
     return makeNotif(.openat, .{
         .pid = pid,
         .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
@@ -144,11 +148,11 @@ fn makeOpenatNotif(pid: Proc.AbsPid, path: [*:0]const u8, flags: u32, mode: u32)
 
 test "openat /dev/null returns VFD >= 3" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "/dev/null", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "/dev/null", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(!isError(resp));
     try testing.expect(resp.val >= 3);
@@ -156,11 +160,11 @@ test "openat /dev/null returns VFD >= 3" {
 
 test "openat /proc/self returns VFD >= 3" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "/proc/self", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "/proc/self", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(!isError(resp));
     try testing.expect(resp.val >= 3);
@@ -168,11 +172,11 @@ test "openat /proc/self returns VFD >= 3" {
 
 test "openat /sys/class/net returns EPERM" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "/sys/class/net", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "/sys/class/net", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.PERM))), resp.@"error");
@@ -180,11 +184,11 @@ test "openat /sys/class/net returns EPERM" {
 
 test "openat /tmp/.bvisor/secret returns EPERM" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "/tmp/.bvisor/secret", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "/tmp/.bvisor/secret", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.PERM))), resp.@"error");
@@ -192,11 +196,11 @@ test "openat /tmp/.bvisor/secret returns EPERM" {
 
 test "openat relative path returns EINVAL" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "relative/path", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "relative/path", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.INVAL))), resp.@"error");
@@ -204,11 +208,11 @@ test "openat relative path returns EINVAL" {
 
 test "openat empty path returns EINVAL" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.INVAL))), resp.@"error");
@@ -216,8 +220,8 @@ test "openat empty path returns EINVAL" {
 
 test "openat unknown caller PID returns ESRCH" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     const notif = makeOpenatNotif(999, "/dev/null", 0, 0);
@@ -228,11 +232,11 @@ test "openat unknown caller PID returns ESRCH" {
 
 test "openat /proc/999 non-existent returns ENOENT" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_pid, "/proc/999", 0, 0);
+    const notif = makeOpenatNotif(init_tid, "/proc/999", 0, 0);
     const resp = handle(notif, &supervisor);
     try testing.expect(isError(resp));
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.NOENT))), resp.@"error");

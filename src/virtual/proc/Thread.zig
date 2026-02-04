@@ -88,7 +88,7 @@ pub fn init(allocator: Allocator, tid: AbsTid, thread_group: ?*ThreadGroup, name
     return self;
 }
 
-/// Return the Tgid of a Thread
+/// Return the AbsTgid of a Thread
 pub fn get_tgid(self: *Self) AbsTgid {
     return self.thread_group.tgid;
 }

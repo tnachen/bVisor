@@ -20,10 +20,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyContinue(notif.id);
     }
 
+    // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         logger.log("close: Task not found for tid={d}: {}", .{ caller_tid, err });
         return replyErr(notif.id, .SRCH);
     };
+    std.debug.assert(caller.tid != caller_tid);
 
     // Look up the File in the FdTable
     const file = caller.fd_table.get(fd) orelse {

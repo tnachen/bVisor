@@ -97,6 +97,8 @@ pub fn get(self: *Self, tid: AbsTid) !*Thread {
 
     // Initial lookup failed, try lazy register
     try self.syncNewThreads();
+
+    // Followup lookup
     if (self.lookup.get(tid)) |thread| return thread;
 
     // Still not found, give up
@@ -107,7 +109,7 @@ pub fn get(self: *Self, tid: AbsTid) !*Thread {
 ///
 /// This is a hotpath for any NsTgid, targeting syscalls like kill and waitpid.
 /// So, syncs with kernel only happen if initial lookup fails.
-/// Found Thread must be the group leader satisfying TID == nstgid
+/// Found Thread must be the group leader satisfying namespaced TID == nstgid
 pub fn getNamespaced(
     self: *Self,
     ref_thread: *Thread,
@@ -249,6 +251,11 @@ pub fn handleThreadExit(self: *Self, tid: AbsTid) !void {
         _ = self.lookup.remove(thread.tid);
         thread.deinit(self.allocator);
     }
+}
+
+pub inline fn get_leader(self: *Self, thread: *Thread) !*Thread {
+    const leader_tid = thread.get_tgid();
+    return self.get(leader_tid);
 }
 
 // ============================================================================

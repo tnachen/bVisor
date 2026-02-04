@@ -4,6 +4,7 @@ const Supervisor = @import("../../../Supervisor.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const AbsTgid = Thread.AbsTgid;
+const NsTgid = Thread.NsTgid;
 const Threads = @import("../../proc/Threads.zig");
 const CloneFlags = Threads.CloneFlags;
 const proc_info = @import("../../../deps/deps.zig").proc_info;
@@ -13,25 +14,44 @@ const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const isError = @import("../../../seccomp/notif.zig").isError;
 
+/// getppid return the namespaced TGID of the parent thread
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+
+    // Parse args
     const caller_tid: AbsTid = @intCast(notif.pid);
 
+    // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         std.log.err("getppid: Thread not found with tid={d}: {}", .{ caller_tid, err });
         return replyErr(notif.id, .SRCH);
     };
+    std.debug.assert(caller.tid != caller_tid);
 
-    // Return parent's kernel TGID, or 0 if:
+    // Get leader of caller's ThreadGroup
+    const leader = supervisor.guest_threads.get_leader(caller) catch |err| {
+        std.log.err("getppid: leader Thread not found for caller Thread with tid={d}: {}", .{ caller_tid, err });
+        return replyErr(notif.id, .SRCH);
+    };
+
+    // Return 0 if:
     // - No parent (sandbox root)
     // - Parent not visible (e.g., in CLONE_NEWPID case where parent is in different namespace)
-    if (caller.parent == null) return replySuccess(notif.id, 0);
-    const parent = caller.parent.?;
-    if (!caller.canSee(parent)) return replySuccess(notif.id, 0);
+    if (leader.parent == null) return replySuccess(notif.id, 0);
+    // Get parent Thread to leader
+    const parent = leader.parent.?;
+    if (!leader.canSee(parent)) return replySuccess(notif.id, 0);
 
-    // Caller can see parent, but we need to remap to AbsTgid
-    const abs_ptgid = caller.namespace.getAbsTgid(parent) orelse std.debug.panic("getppid: Supervisor invariant violated - Thread's Namespace doesn't contain the Thread itself", .{});
+    // Leader can see parent
+    // Get leader of parent's ThreadGroup
+    const parent_leader = supervisor.guest_threads.get_leader(parent) catch |err| {
+        std.log.err("getppid: leader Thread not found for parent Thread with tid={d}: {}", .{ parent.tid, err });
+        return replyErr(notif.id, .SRCH);
+    };
 
-    return replySuccess(notif.id, @intCast(abs_ptgid));
+    // Get namespaced TGID of parent's ThreadGroup, which matches the namespaced TID of the parent's leader
+    const ns_ptgid: NsTgid = parent_leader.namespace.getNsTid(parent_leader) orelse std.debug.panic("getpid: Supervisor invariant violated - parent Thread's group leader's Namespace doesn't contain the parent's leader Thread itself", .{});
+
+    return replySuccess(notif.id, @intCast(ns_ptgid));
 }
 
 test "getppid for init Thread returns 0" {

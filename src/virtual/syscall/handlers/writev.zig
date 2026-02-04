@@ -2,7 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const Proc = @import("../../proc/Proc.zig");
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/file.zig").File;
 const Supervisor = @import("../../../Supervisor.zig");
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
@@ -19,23 +20,25 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const logger = supervisor.logger;
 
     // Parse args
-    const caller_pid: Proc.AbsPid = @intCast(notif.pid);
+    const caller_tid: AbsTid = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
 
     // Continue in case of stdout or stderr
-    // In the future we'll virtualize this ourselves for more control of where logs go
+    // TODO: virtualize this ourselves for more control of where logs go
     if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
         return replyContinue(notif.id);
     }
 
-    const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-        logger.log("writev: process not found for pid={d}: {}", .{ caller_pid, err });
+    // Get caller Thread
+    const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+        logger.log("writev: process not found for pid={d}: {}", .{ caller_tid, err });
         return replyErr(notif.id, .SRCH);
     };
+    std.debug.assert(caller.tid != caller_tid);
 
-    // Look up the file object
+    // Look up the File
     const file = caller.fd_table.get(fd) orelse {
         logger.log("writev: EBADF for fd={d}", .{fd});
         return replyErr(notif.id, .BADF);
@@ -48,7 +51,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     for (0..iovec_count) |i| {
         const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec_const);
-        iovecs[i] = memory_bridge.read(posix.iovec_const, caller_pid, iov_addr) catch {
+        iovecs[i] = memory_bridge.read(posix.iovec_const, caller_tid, iov_addr) catch {
             return replyErr(notif.id, .FAULT);
         };
     }
@@ -61,14 +64,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         if (buf_len > 0) {
             const dest = data_buf[data_len..][0..buf_len];
-            memory_bridge.readSlice(dest, caller_pid, buf_ptr) catch {
+            memory_bridge.readSlice(dest, caller_tid, buf_ptr) catch {
                 return replyErr(notif.id, .FAULT);
             };
             data_len += buf_len;
         }
     }
 
-    // Write to the file
+    // Write to the File
     const n = file.write(data_buf[0..data_len]) catch |err| {
         logger.log("writev: error writing to fd: {s}", .{@errorName(err)});
         return replyErr(notif.id, .IO);
@@ -91,11 +94,11 @@ const Tmp = @import("../../fs/backend/tmp.zig").Tmp;
 
 test "writev single iovec writes data" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const tmp_file = try Tmp.open(&supervisor.overlay, "/tmp/writev_test1", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
     const vfd = try caller.fd_table.insert(File{ .tmp = tmp_file });
 
@@ -105,7 +108,7 @@ test "writev single iovec writes data" {
     };
 
     const notif = makeNotif(.writev, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,
@@ -118,11 +121,11 @@ test "writev single iovec writes data" {
 
 test "writev multiple iovecs concatenated write" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const tmp_file = try Tmp.open(&supervisor.overlay, "/tmp/writev_test2", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
     const vfd = try caller.fd_table.insert(File{ .tmp = tmp_file });
 
@@ -136,7 +139,7 @@ test "writev multiple iovecs concatenated write" {
     };
 
     const notif = makeNotif(.writev, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 3,
@@ -149,8 +152,8 @@ test "writev multiple iovecs concatenated write" {
 
 test "writev FD 1 (stdout) returns replyContinue" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     const data = "hello";
@@ -159,7 +162,7 @@ test "writev FD 1 (stdout) returns replyContinue" {
     };
 
     const notif = makeNotif(.writev, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 1, // stdout
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,
@@ -171,8 +174,8 @@ test "writev FD 1 (stdout) returns replyContinue" {
 
 test "writev FD 2 (stderr) returns replyContinue" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     const data = "error";
@@ -181,7 +184,7 @@ test "writev FD 2 (stderr) returns replyContinue" {
     };
 
     const notif = makeNotif(.writev, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 2, // stderr
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,
@@ -193,8 +196,8 @@ test "writev FD 2 (stderr) returns replyContinue" {
 
 test "writev non-existent VFD returns EBADF" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     const data = "hello";
@@ -203,7 +206,7 @@ test "writev non-existent VFD returns EBADF" {
     };
 
     const notif = makeNotif(.writev, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 99,
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,

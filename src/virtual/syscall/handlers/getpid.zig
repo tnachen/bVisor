@@ -4,6 +4,7 @@ const Supervisor = @import("../../../Supervisor.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const AbsTgid = Thread.AbsTgid;
+const NsTgid = Thread.NsTgid;
 const Threads = @import("../../proc/Threads.zig");
 const CloneFlags = Threads.CloneFlags;
 const proc_info = @import("../../../deps/deps.zig").proc_info;
@@ -13,15 +14,27 @@ const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const isError = @import("../../../seccomp/notif.zig").isError;
 
+/// getpid return the namespaced TGID of the thread
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+
+    // Parse args
     const caller_tid: AbsTid = @intCast(notif.pid);
 
+    // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         std.log.err("getpid: Thread not found with tid={d}: {}", .{ caller_tid, err });
         return replyErr(notif.id, .SRCH);
     };
+    std.debug.assert(caller.tid != caller_tid);
 
-    const ns_tgid = caller.namespace.getAbsTgid(caller) orelse std.debug.panic("getpid: Supervisor invariant violated - Thread's Namespace doesn't the Thread itself", .{});
+    // Get leader of caller's ThreadGroup
+    const leader = supervisor.guest_threads.get_leader(caller) catch |err| {
+        std.log.err("getpid: leader Thread not found for caller Thread with tid={d}: {}", .{ caller_tid, err });
+        return replyErr(notif.id, .SRCH);
+    };
+
+    // Get namespaced TGID of this ThreadGroup, which matches the namespaced TID of the leader
+    const ns_tgid: NsTgid = leader.namespace.getNsTid(leader) orelse std.debug.panic("getpid: Supervisor invariant violated - Thread's group leader's Namespace doesn't contain the leader Thread itself", .{});
 
     return replySuccess(notif.id, @intCast(ns_tgid));
 }
