@@ -1,7 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Proc = @import("../../proc/Proc.zig");
-const File = @import("../../fs/file.zig").File;
+const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
@@ -20,9 +20,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyContinue(notif.id);
     }
 
-    // Copy the File value before removing — fd_table.get() returns a pointer into the
-    // hash map's internal storage, which becomes dangling after remove().
-    var file: File = undefined;
+    var file: *File = undefined;
     {
         supervisor.mutex.lock();
         defer supervisor.mutex.unlock();
@@ -32,14 +30,16 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             return replyErr(notif.id, .SRCH);
         };
 
-        const file_ptr = caller.fd_table.get(fd) orelse {
+        file = caller.fd_table.get_ref(fd) orelse {
             logger.log("close: EBADF for fd={d}", .{fd});
             return replyErr(notif.id, .BADF);
         };
 
-        file = file_ptr.*;
+        // Remove the file from the fd table
+        // Our stack-local ref stays alive until unref'ed
         _ = caller.fd_table.remove(fd);
     }
+    defer file.unref();
 
     // File close happens outside the lock since already removed from fd_table
     file.close();
@@ -66,7 +66,7 @@ test "close virtual FD returns success and removes from table" {
 
     const caller = supervisor.guest_procs.lookup.get(init_pid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(File{ .proc = proc_file });
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
 
     const notif = makeNotif(.close, .{
         .pid = init_pid,
@@ -78,7 +78,9 @@ test "close virtual FD returns success and removes from table" {
     try testing.expectEqual(@as(i64, 0), resp.val);
 
     // VFD should be gone
-    try testing.expect(caller.fd_table.get(vfd) == null);
+    const ref = caller.fd_table.get_ref(vfd);
+    defer if (ref) |f| f.unref();
+    try testing.expect(ref == null);
 }
 
 test "after close, read same VFD returns EBADF" {
@@ -89,7 +91,7 @@ test "after close, read same VFD returns EBADF" {
 
     const caller = supervisor.guest_procs.lookup.get(init_pid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(File{ .proc = proc_file });
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
 
     // Close it
     const close_notif = makeNotif(.close, .{
@@ -166,7 +168,7 @@ test "double close - first succeeds, second EBADF" {
 
     const caller = supervisor.guest_procs.lookup.get(init_pid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(File{ .proc = proc_file });
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
 
     const notif = makeNotif(.close, .{
         .pid = init_pid,

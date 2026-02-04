@@ -2,7 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const Proc = @import("../../proc/Proc.zig");
-const File = @import("../../fs/file.zig").File;
+const File = @import("../../fs/File.zig");
 const Passthrough = @import("../../fs/backend/passthrough.zig").Passthrough;
 const Cow = @import("../../fs/backend/cow.zig").Cow;
 const Tmp = @import("../../fs/backend/tmp.zig").Tmp;
@@ -19,6 +19,7 @@ const memory_bridge = deps.memory_bridge;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
+    const allocator = supervisor.allocator;
     const caller_pid: Proc.AbsPid = @intCast(notif.pid);
 
     // Read path from caller's memory
@@ -68,20 +69,29 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
             // Open the file via the appropriate backend
             // Note all are lock-free (independent of internal supervisor state) except for proc
-            const file: File = switch (backend) {
-                .passthrough => .{ .passthrough = Passthrough.open(&supervisor.overlay, path, flags, mode) catch |err| {
+            const file: *File = switch (backend) {
+                .passthrough => File.init(allocator, .{ .passthrough = Passthrough.open(&supervisor.overlay, path, flags, mode) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
                     return replyErr(notif.id, .IO);
-                } },
-                .cow => .{ .cow = Cow.open(&supervisor.overlay, path, flags, mode) catch |err| {
+                } }) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
                     return replyErr(notif.id, .IO);
-                } },
-                .tmp => .{ .tmp = Tmp.open(&supervisor.overlay, path, flags, mode) catch |err| {
+                },
+                .cow => File.init(allocator, .{ .cow = Cow.open(&supervisor.overlay, path, flags, mode) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
                     return replyErr(notif.id, .IO);
-                } },
-                .proc => .{
+                } }) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    return replyErr(notif.id, .IO);
+                },
+                .tmp => File.init(allocator, .{ .tmp = Tmp.open(&supervisor.overlay, path, flags, mode) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    return replyErr(notif.id, .IO);
+                } }) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    return replyErr(notif.id, .IO);
+                },
+                .proc => File.init(allocator, .{
                     .proc = blk: {
                         // Special case: the open of ProcFile requires passing in the caller
                         // So we need a critical section since get does lazy registration
@@ -97,6 +107,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
                             return replyErr(notif.id, if (err == error.FileNotFound) .NOENT else .IO);
                         };
                     },
+                }) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    return replyErr(notif.id, .IO);
                 },
             };
 
@@ -111,12 +124,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
             const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
                 logger.log("openat: process not found for pid={d}: {}", .{ caller_pid, err });
+                file.unref();
                 return replyErr(notif.id, .SRCH);
             };
 
             // Insert into fd table and return the virtual fd
             const vfd = caller.fd_table.insert(file) catch {
                 logger.log("openat: failed to insert fd", .{});
+                file.unref();
                 return replyErr(notif.id, .MFILE);
             };
             logger.log("openat: opened {s} as vfd={d}", .{ path, vfd });
