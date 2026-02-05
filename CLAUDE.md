@@ -47,31 +47,45 @@ src/
       deps.zig          # Re-exports pidfd, memory_bridge, proc_info
       memory_bridge/
         memory_bridge.zig # Comptime selector for implementation
-        impl/linux.zig  # Production: process_vm_readv/writev
-        impl/testing.zig # Testing: local pointer access
+        impl/linux.zig    # Production: process_vm_readv/writev
+        impl/testing.zig  # Testing: local pointer access
       pidfd/
-        pidfd.zig       # Comptime selector for implementation
-        impl/linux.zig  # Production: pidfd_open/pidfd_getfd
-        impl/testing.zig # Testing: mock implementation
+        pidfd.zig         # Comptime selector for implementation
+        impl/linux.zig    # Production: pidfd_open/pidfd_getfd
+        impl/testing.zig  # Testing: mock implementation
       proc_info/
-        proc_info.zig   # Comptime selector for implementation
-        impl/linux.zig  # Production: Parent PID and clone flags detection
-        impl/testing.zig # Testing: mock implementation
+        proc_info.zig     # Comptime selector for implementation
+        impl/linux.zig    # Production: TID/TGID info, clone flags detection via /proc
+        impl/testing.zig  # Testing: mock maps (mock_ptid_map, mock_clone_flags, mock_nstids, mock_nstgids)
 
     virtual/            # Virtualization layer
-      proc/             # Process virtualization
-        Procs.zig       # Manages all virtual processes, kernel→virtual PID mapping
-        Proc.zig        # Single process: pid, namespace, fd_table, parent/children
-        Namespace.zig   # PID namespace with refcounting, vpid allocation
+      OverlayRoot.zig   # Root overlay filesystem management
+      path.zig          # Path normalization and resolution utilities
+      proc/             # Thread/process virtualization
+        Threads.zig     # Manages all threads, kernel TID → Thread mapping
+        Thread.zig      # Single thread: tid, thread_group, namespace, fd_table, parent/children
+        ThreadGroup.zig # Thread group (process): tgid, threads map
+        ThreadStatus.zig # Thread status information
+        Namespace.zig   # TID namespace with refcounting, NsTid allocation
       fs/               # File descriptor virtualization
         FdTable.zig     # Per-process fd table, refcounted (shared on CLONE_FILES)
-        OpenFile.zig    # Virtual FD union: kernel passthrough, proc files, COW files
+        FdEntry.zig     # Entry type in fd table, containing pointer to File and CLOEXEC flag
+        File.zig        # Virtual file with Backend union and refcounting
+        backend/        # File backend implementations
+          passthrough.zig # Kernel FD passthrough
+          cow.zig       # Copy-on-write files
+          tmp.zig       # Temporary files
+          procfile.zig  # Virtualized /proc files
       syscall/          # Syscall handlers
         syscalls.zig    # Switch statement over syscalls, parsing notifications
-        handlers/
-          OpenAt.zig    # openat handler with path rules (block/allow/virtualize)
-          Writev.zig    # writev handler
-          ...           # handlers for other any other implemented syscalls
+        e2e_test.zig    # End-to-end syscall tests
+        handlers/       # Individual syscall handlers (lowercase filenames)
+          openat.zig    # openat handler with path rules (block/allow/virtualize)
+          close.zig     # close handler
+          read.zig, write.zig, readv.zig, writev.zig  # I/O handlers
+          getpid.zig, getppid.zig, gettid.zig         # ID handlers
+          exit.zig, exit_group.zig                    # Exit handlers
+          kill.zig, tkill.zig                         # Signal handlers
 
   sdks/
     node/               # Node.js SDK (see src/sdks/node/CLAUDE.md)
@@ -84,17 +98,21 @@ src/
 
 **Syscall flow**: Child syscall → kernel USER_NOTIF → Supervisor.recv() → Notification.handle() → Syscall handler or passthrough → Supervisor.send()
 
-**Process virtualization**:
-- `Procs` tracks all sandboxed processes with kernel PID (from the perspective of the supervisor) → guest PID (from the perspective of the guest) mapping
-- Each `Proc` has its own `FdTable` and belongs to a `Namespace`
+**Thread virtualization** (follows Linux kernel model where threads are the basic unit):
+- `Threads` tracks all sandboxed threads with kernel TID → `Thread` mapping
+- ID types: `AbsTid`/`NsTid` (thread IDs), `AbsTgid`/`NsTgid` (thread group IDs, aka PIDs)
+- `Thread` has `.tid`, `.thread_group`, `.namespace`, `.fd_table`, `.parent`, `.children`
+- `ThreadGroup` represents a process (group of threads sharing address space)
+- For the thread group leader: TID == TGID. For other threads: TID is unique, while TGID == leader's TID
 - `CLONE_FILES` shares fd_table (refcounted), otherwise cloned
-- `CLONE_NEWPID` creates new namespace, otherwise inherited
-- Killing a process kills its entire subtree (including nested namespaces)
+- `CLONE_NEWPID` creates new TID namespace, otherwise inherited
+- Killing a thread kills its entire subtree (including nested namespaces)
 
-**FD handling**: Uses virtual FD abstraction with `OpenFile` union enum:
-- `.kernel` - passthrough to real kernel FD (from the perspective of the supervisor)
+**FD handling**: Uses virtual FD abstraction with `File.zig` containing a `Backend` union enum:
+- `.passthrough` - kernel FD passthrough (from the perspective of the supervisor)
 - `.proc` - virtualized `/proc` files (e.g., `/proc/self` returns guest PID)
-- `.cow` - copy-on-write files (not yet implemented)
+- `.cow` - copy-on-write files
+- `.tmp` - temporary files
 - FDs 0,1,2 (stdin/stdout/stderr) are handled specially
 
 **Path resolution in OpenAt**:
@@ -104,9 +122,9 @@ src/
 
 **Adding a new emulated syscall:**
 When implementing a new emulated syscall,
-1. Create `src/virtual/syscall/handlers/{newsyscall}.zig` (lowercase) with `handle()` method
-2. Update the corresponding case in the switch in `src/virtual/syscall/syscalls.zig`
-3. Add test import in `src/main.zig` test block: `_ = @import("virtual/syscall/handlers/{newsyscall}.zig");`
+1. Create `src/core/virtual/syscall/handlers/{newsyscall}.zig` (lowercase) with `handle()` method
+2. Update the corresponding case in the switch in `src/core/virtual/syscall/syscalls.zig`
+3. Add test import in `src/core/main.zig` test block: `_ = @import("virtual/syscall/handlers/{newsyscall}.zig");`
 
 ## Testing
 
@@ -118,24 +136,32 @@ else
     @import("impl/linux.zig");
 ```
 
-**Test discovery**: Zig only runs tests from files transitively imported by the test root. Tests in standalone files must be explicitly imported in `src/main.zig`:
+**Test discovery**: Zig only runs tests from files transitively imported by the test root. Tests in standalone files must be explicitly imported in `src/core/main.zig`:
 ```zig
 test {
     _ = @import("Supervisor.zig");
-    _ = @import("virtual/proc/Procs.zig");
-    _ = @import("virtual/fs/OpenFile.zig");
+    _ = @import("deps/proc_info/impl/linux.zig");
+    _ = @import("virtual/proc/Threads.zig");
     _ = @import("virtual/fs/FdTable.zig");
-    _ = @import("virtual/fs/Cow.zig");
-    _ = @import("virtual/fs/Tmp.zig");
+    _ = @import("virtual/path.zig");
+    _ = @import("virtual/fs/backend/procfile.zig");
+    _ = @import("virtual/fs/backend/cow.zig");
+    _ = @import("virtual/fs/backend/tmp.zig");
+    _ = @import("virtual/syscall/handlers/exit.zig");
     _ = @import("virtual/syscall/handlers/exit_group.zig");
+    _ = @import("virtual/syscall/handlers/tkill.zig");
     _ = @import("virtual/syscall/handlers/getpid.zig");
     _ = @import("virtual/syscall/handlers/getppid.zig");
     _ = @import("virtual/syscall/handlers/kill.zig");
     _ = @import("virtual/syscall/handlers/openat.zig");
+    _ = @import("virtual/syscall/handlers/close.zig");
     _ = @import("virtual/syscall/handlers/read.zig");
     _ = @import("virtual/syscall/handlers/readv.zig");
     _ = @import("virtual/syscall/handlers/write.zig");
     _ = @import("virtual/syscall/handlers/writev.zig");
+    _ = @import("virtual/syscall/e2e_test.zig");
+    _ = @import("virtual/OverlayRoot.zig");
+    _ = @import("virtual/fs/backend/passthrough.zig");
 }
 ```
 

@@ -7,7 +7,7 @@ const types = @import("types.zig");
 const syscalls = @import("virtual/syscall/syscalls.zig");
 const Result = types.LinuxResult;
 const Logger = types.Logger;
-const Procs = @import("virtual/proc/Procs.zig");
+const Threads = @import("virtual/proc/Threads.zig");
 const OverlayRoot = @import("virtual/OverlayRoot.zig");
 const Allocator = std.mem.Allocator;
 
@@ -15,13 +15,13 @@ const Self = @This();
 
 allocator: Allocator,
 io: Io,
-init_guest_pid: linux.pid_t,
+init_guest_tid: linux.pid_t,
 notify_fd: linux.fd_t,
 logger: Logger,
 
-// All procs starting from the initial guest proc are assigned a virtual PID and tracked via guest_procs
-// All pros track their own virtual namespaces and file descriptors
-guest_procs: Procs,
+// All Thread-s starting from the initial guest Thread are assigned a virtual TID and tracked via guest_threads
+// Each Thread tracks its own virtual namespaces and file descriptors
+guest_threads: Threads,
 
 // Mutex protecting the entirety of Supervisor's internal state, (Procs/Proc/Namespace/FdTable)
 // This is the simplest, dumbest implementation, will optimize over time.
@@ -30,11 +30,11 @@ mutex: std.Thread.Mutex = .{},
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
 
-pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_pid: linux.pid_t) !Self {
+pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t) !Self {
     const logger = Logger.init(.supervisor);
-    var guest_procs = Procs.init(allocator);
-    errdefer guest_procs.deinit();
-    _ = try guest_procs.handleInitialProcess(init_guest_pid);
+    var guest_threads = Threads.init(allocator);
+    errdefer guest_threads.deinit();
+    _ = try guest_threads.handleInitialThread(init_guest_tid);
 
     const uid = generateUid();
     var overlay = try OverlayRoot.init(io, uid);
@@ -43,10 +43,10 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_pid:
     return .{
         .allocator = allocator,
         .io = io,
-        .init_guest_pid = init_guest_pid,
+        .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
         .logger = logger,
-        .guest_procs = guest_procs,
+        .guest_threads = guest_threads,
         .overlay = overlay,
     };
 }
@@ -65,7 +65,7 @@ pub fn deinit(self: *Self) void {
     if (self.notify_fd >= 0) {
         posix.close(self.notify_fd);
     }
-    self.guest_procs.deinit();
+    self.guest_threads.deinit();
     self.overlay.deinit();
 }
 
@@ -128,8 +128,8 @@ fn send(self: Self, resp: linux.SECCOMP.notif_resp) !void {
         .Ok => {},
         .Error => |err| switch (err) {
             .NOENT => {
-                // Process exited before we could respond - this is fine
-                self.logger.log("Process exited before response could be sent", .{});
+                // Task exited before we could respond - this is fine
+                self.logger.log("Task exited before response could be sent", .{});
             },
             else => return posix.unexpectedErrno(err),
         },

@@ -2,7 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const Proc = @import("../../proc/Proc.zig");
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
@@ -21,7 +22,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const logger = supervisor.logger;
 
     // Parse args
-    const caller_pid: Proc.AbsPid = @intCast(notif.pid);
+    const caller_tid: AbsTid = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const buf_addr: u64 = notif.data.arg1;
     const count: usize = @truncate(notif.data.arg2);
@@ -39,10 +40,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         supervisor.mutex.lock();
         defer supervisor.mutex.unlock();
 
-        const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-            logger.log("read: process not found for pid={d}: {}", .{ caller_pid, err });
+        // Get caller Thread
+        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+            logger.log("read: Thread not found with tid={d}: {}", .{ caller_tid, err });
             return replyErr(notif.id, .SRCH);
         };
+        std.debug.assert(caller.tid == caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("read: EBADF for fd={d}", .{fd});
@@ -79,25 +82,25 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 // Tests
 // ============================================================================
 
-const Procs = @import("../../proc/Procs.zig");
+const Threads = @import("../../proc/Threads.zig");
 const FdTable = @import("../../fs/FdTable.zig");
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
 
 test "read from virtual file returns data" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     // Insert a proc file into the fd table (content "100\n")
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Create a buffer for the result
     var result_buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&result_buf),
         .arg2 = result_buf.len,
@@ -111,17 +114,17 @@ test "read from virtual file returns data" {
 
 test "read count=5 from larger file returns at most 5 bytes" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var result_buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&result_buf),
         .arg2 = 5,
@@ -134,13 +137,13 @@ test "read count=5 from larger file returns at most 5 bytes" {
 
 test "read from FD 0 (stdin) returns replyContinue" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 0, // stdin
         .arg1 = @intFromPtr(&buf),
         .arg2 = buf.len,
@@ -152,17 +155,17 @@ test "read from FD 0 (stdin) returns replyContinue" {
 
 test "read count=0 returns 0" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var result_buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&result_buf),
         .arg2 = 0,
@@ -175,13 +178,13 @@ test "read count=0 returns 0" {
 
 test "read from non-existent VFD returns EBADF" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
     const notif = makeNotif(.read, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 99, // non-existent vfd
         .arg1 = @intFromPtr(&buf),
         .arg2 = buf.len,
@@ -194,8 +197,8 @@ test "read from non-existent VFD returns EBADF" {
 
 test "read with unknown caller PID returns ESRCH" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;

@@ -2,45 +2,51 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const Supervisor = @import("../../../Supervisor.zig");
-const Proc = @import("../../proc/Proc.zig");
-const AbsPid = Proc.AbsPid;
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
+const NsTid = Thread.NsTid;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 /// tkill(tid, sig) sends a signal to a specific thread.
-/// Unlike kill, tid is always a positive thread ID — no process group semantics.
-/// Since bVisor doesn't support multi-threading yet, tid == pid.
+/// Unlike kill, tid is always a positive TID — no process group semantics.
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const caller_pid: AbsPid = @intCast(notif.pid);
-    const target_tid: AbsPid = @intCast(@as(i64, @bitCast(notif.data.arg0)));
+
+    // Parse args
+    const caller_tid: AbsTid = @intCast(notif.pid);
+    const target_nstid: NsTid = @intCast(@as(i64, @bitCast(notif.data.arg0)));
     const signal: u6 = @truncate(notif.data.arg1);
 
-    if (target_tid <= 0) {
+    if (target_nstid <= 0) {
         return replyErr(notif.id, .INVAL);
     }
 
-    // Resolve target tid to absolute pid
-    var target_abs_pid: AbsPid = undefined;
+    // Critical section just to normalize target namespaced TID to absolute TID
+    var target_abs_tid: AbsTid = undefined;
     {
         supervisor.mutex.lock();
         defer supervisor.mutex.unlock();
 
-        const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-            std.log.err("tkill: process not found for pid={d}: {}", .{ caller_pid, err });
+        // Get caller Thread
+        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+            std.log.err("tkill: Thread not found with tid={d}: {}", .{ caller_tid, err });
+            return replyErr(notif.id, .SRCH);
+        };
+        std.debug.assert(caller.tid == caller_tid);
+
+        // Lookup Thread with matching namespaced TID
+        const target = supervisor.guest_threads.getNamespaced(caller, target_nstid) catch |err| {
+            std.log.err("tkill: target Thread not found for tid={d}: {}", .{ target_nstid, err });
             return replyErr(notif.id, .SRCH);
         };
 
-        // Since tid == pid (no threading), use namespace lookup same as kill
-        const target = supervisor.guest_procs.getNamespaced(caller, target_tid) catch |err| {
-            std.log.err("tkill: target thread not found for tid={d}: {}", .{ target_tid, err });
-            return replyErr(notif.id, .SRCH);
-        };
-
-        target_abs_pid = target.pid;
+        // Yield the targetted TID in absolute terms
+        target_abs_tid = target.tid;
     }
 
+    // Execute real tkill syscall outside the lock
     const sig: posix.SIG = @enumFromInt(signal);
-    posix.kill(@intCast(target_abs_pid), sig) catch |err| {
+    posix.kill(@intCast(target_abs_tid), sig) catch |err| {
         const errno: linux.E = switch (err) {
             error.PermissionDenied => .PERM,
             error.ProcessNotFound => .SRCH,
@@ -48,6 +54,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         };
         return replyErr(notif.id, errno);
     };
+
+    // Do not remove from internal Threads tracking.
+    // Killing a thread is just a signal invocation.
+    // exit is what actually removes it from threads.
 
     return replySuccess(notif.id, 0);
 }

@@ -18,6 +18,7 @@ const kill = @import("handlers/kill.zig");
 const tkill = @import("handlers/tkill.zig");
 const exit_ = @import("handlers/exit.zig");
 const exit_group = @import("handlers/exit_group.zig");
+const dup3 = @import("handlers/dup3.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -31,6 +32,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .write => write.handle(notif, supervisor),
         .readv => readv.handle(notif, supervisor),
         .writev => writev.handle(notif, supervisor),
+        .dup3 => dup3.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),
@@ -42,8 +44,9 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
 
         // Passthrough - create child process (kernel only, we lazily discover child later)
         .clone => replyContinue(notif.id),
-        // Passthrough - wait for child (kernel handles blocking, exit_group handles proc cleanup)
+        // Passthrough - wait for child(ren) (kernel handles blocking, exit_group handles proc cleanup)
         .wait4 => replyContinue(notif.id),
+        .waitid => replyContinue(notif.id),
 
         // To implement - files
         .fstat,
@@ -51,7 +54,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .fcntl,
         .ioctl,
         .dup,
-        .dup3,
         .pipe2,
         .lseek,
         .getcwd,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const linux = std.os.linux;
 const posix = std.posix;
 
 const Cow = @import("backend/cow.zig").Cow;
@@ -25,7 +26,11 @@ ref_count: AtomicUsize = undefined,
 pub fn init(allocator: std.mem.Allocator, backend: Backend) !*Self {
     const self = try allocator.create(Self);
     errdefer allocator.destroy(self);
-    self.* = .{ .backend = backend, .allocator = allocator, .ref_count = AtomicUsize.init(1) };
+    self.* = .{
+        .backend = backend,
+        .allocator = allocator,
+        .ref_count = AtomicUsize.init(1),
+    };
     return self;
 }
 

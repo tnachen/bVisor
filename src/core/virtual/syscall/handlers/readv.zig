@@ -2,7 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const types = @import("../../../types.zig");
-const Proc = @import("../../proc/Proc.zig");
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const testing = std.testing;
@@ -23,7 +24,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const logger = supervisor.logger;
 
     // Parse args
-    const caller_pid: Proc.AbsPid = @intCast(notif.pid);
+    const caller_tid: AbsTid = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
@@ -41,10 +42,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         supervisor.mutex.lock();
         defer supervisor.mutex.unlock();
 
-        const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-            logger.log("readv: process not found for pid={d}: {}", .{ caller_pid, err });
+        // Get caller Thread
+        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+            logger.log("readv: Thread not found for tid={d}: {}", .{ caller_tid, err });
             return replyErr(notif.id, .SRCH);
         };
+        std.debug.assert(caller.tid == caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("readv: EBADF for fd={d}", .{fd});
@@ -59,7 +62,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     for (0..iovec_count) |i| {
         const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec);
-        iovecs[i] = memory_bridge.read(posix.iovec, caller_pid, iov_addr) catch {
+        iovecs[i] = memory_bridge.read(posix.iovec, caller_tid, iov_addr) catch {
             return replyErr(notif.id, .FAULT);
         };
         total_requested += iovecs[i].len;
@@ -88,7 +91,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         const to_write = @min(iov.len, remaining);
 
         if (to_write > 0) {
-            memory_bridge.writeSlice(read_buf[bytes_written..][0..to_write], caller_pid, buf_ptr) catch {
+            memory_bridge.writeSlice(read_buf[bytes_written..][0..to_write], caller_tid, buf_ptr) catch {
                 return replyErr(notif.id, .FAULT);
             };
             bytes_written += to_write;
@@ -103,20 +106,20 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 // Tests
 // ============================================================================
 
-const Procs = @import("../../proc/Procs.zig");
+const Threads = @import("../../proc/Threads.zig");
 const FdTable = @import("../../fs/FdTable.zig");
 const ProcFileMod = @import("../../fs/backend/procfile.zig");
 const ProcFile = ProcFileMod.ProcFile;
 
 test "readv single iovec reads data correctly" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Set up a single iovec
     var result_buf: [64]u8 = undefined;
@@ -125,7 +128,7 @@ test "readv single iovec reads data correctly" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,
@@ -139,13 +142,13 @@ test "readv single iovec reads data correctly" {
 
 test "readv multiple iovecs distributes data across buffers" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
-    const caller = supervisor.guest_procs.lookup.get(init_pid).?;
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
-    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }));
+    const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Content is "100\n" (4 bytes), distribute across 2-byte buffers
     var buf1: [2]u8 = undefined;
@@ -156,7 +159,7 @@ test "readv multiple iovecs distributes data across buffers" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 2,
@@ -171,8 +174,8 @@ test "readv multiple iovecs distributes data across buffers" {
 
 test "readv FD 0 returns replyContinue" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -181,7 +184,7 @@ test "readv FD 0 returns replyContinue" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 0, // stdin
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,
@@ -193,8 +196,8 @@ test "readv FD 0 returns replyContinue" {
 
 test "readv non-existent VFD returns EBADF" {
     const allocator = testing.allocator;
-    const init_pid: Proc.AbsPid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_pid);
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
     defer supervisor.deinit();
 
     var buf: [64]u8 = undefined;
@@ -203,7 +206,7 @@ test "readv non-existent VFD returns EBADF" {
     };
 
     const notif = makeNotif(.readv, .{
-        .pid = init_pid,
+        .pid = init_tid,
         .arg0 = 99,
         .arg1 = @intFromPtr(&iovecs),
         .arg2 = 1,

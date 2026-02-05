@@ -7,7 +7,7 @@ const smokeTest = @import("smoke_test.zig").smokeTest;
 test {
     _ = @import("Supervisor.zig");
     _ = @import("deps/proc_info/impl/linux.zig");
-    _ = @import("virtual/proc/Procs.zig");
+    _ = @import("virtual/proc/Threads.zig");
     _ = @import("virtual/fs/FdTable.zig");
     _ = @import("virtual/path.zig");
     _ = @import("virtual/fs/backend/procfile.zig");
@@ -18,6 +18,7 @@ test {
     _ = @import("virtual/syscall/handlers/tkill.zig");
     _ = @import("virtual/syscall/handlers/getpid.zig");
     _ = @import("virtual/syscall/handlers/getppid.zig");
+    _ = @import("virtual/syscall/handlers/gettid.zig");
     _ = @import("virtual/syscall/handlers/kill.zig");
     _ = @import("virtual/syscall/handlers/openat.zig");
     _ = @import("virtual/syscall/handlers/close.zig");
@@ -25,6 +26,7 @@ test {
     _ = @import("virtual/syscall/handlers/readv.zig");
     _ = @import("virtual/syscall/handlers/write.zig");
     _ = @import("virtual/syscall/handlers/writev.zig");
+    _ = @import("virtual/syscall/handlers/dup3.zig");
     _ = @import("virtual/syscall/e2e_test.zig");
     _ = @import("virtual/OverlayRoot.zig");
     _ = @import("virtual/fs/backend/passthrough.zig");

@@ -2,49 +2,59 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const Supervisor = @import("../../../Supervisor.zig");
-const Proc = @import("../../proc/Proc.zig");
-const AbsPid = Proc.AbsPid;
-const NsPid = Proc.NsPid;
-const Procs = @import("../../proc/Procs.zig");
+const Thread = @import("../../proc/Thread.zig");
+const AbsTid = Thread.AbsTid;
+const AbsTgid = Thread.AbsTgid;
+const NsTgid = Thread.NsTgid;
+const Threads = @import("../../proc/Threads.zig");
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const isError = @import("../../../seccomp/notif.zig").isError;
 
+// `kill` kills processes/thread groups specified by a namespaced TGID
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const caller_pid: AbsPid = @intCast(notif.pid);
-    const target_pid: NsPid = @intCast(@as(i64, @bitCast(notif.data.arg0)));
+
+    // Parse args
+    const caller_tid: AbsTid = @intCast(notif.pid);
+    const target_nstgid: NsTgid = @intCast(@as(i64, @bitCast(notif.data.arg0)));
     const signal: u6 = @truncate(notif.data.arg1);
 
-    // Non-positive PIDs (process groups) not supported
+    // Non-positive namespaced TGIDs not supported, for now
     // TODO: support all integer target PIDS
-    if (target_pid <= 0) {
+    if (target_nstgid <= 0) {
         return replyErr(notif.id, .INVAL);
     }
 
-    // Critical section just to normalize target PID to absolute
-    var target_abs_pid: AbsPid = undefined;
+    // Critical section just to normalize target namespaced TGID to absolute
+    var target_abstgid: AbsTgid = undefined;
     {
         supervisor.mutex.lock();
         defer supervisor.mutex.unlock();
 
-        const caller = supervisor.guest_procs.get(caller_pid) catch |err| {
-            std.log.err("kill: process not found for pid={d}: {}", .{ caller_pid, err });
+        // Get caller Thread
+        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+            std.log.err("kill: Thread not found with tid={d}: {}", .{ caller_tid, err });
+            return replyErr(notif.id, .SRCH);
+        };
+        std.debug.assert(caller.tid == caller_tid);
+
+        // There may be *many* candidate Thread-s satisfying having namespaced TGID == target_nstgid.
+        // But, we know there must be a group leader whose namespaced TID == target_nstgid
+        const target_leader = supervisor.guest_threads.getNamespaced(caller, target_nstgid) catch |err| {
+            std.log.err("kill: target Thread not found with tid={d}: {}", .{ target_nstgid, err });
             return replyErr(notif.id, .SRCH);
         };
 
-        const target = supervisor.guest_procs.getNamespaced(caller, target_pid) catch |err| {
-            std.log.err("kill: target process not found for pid={d}: {}", .{ target_pid, err });
-            return replyErr(notif.id, .SRCH);
-        };
-
-        target_abs_pid = target.pid;
+        // Yield the targetted TGID in absolute terms
+        target_abstgid = target_leader.get_tgid();
+        std.debug.assert(target_abstgid == target_leader.tid);
     }
 
-    // Execute real kill syscall
+    // Execute real kill syscall outside the lock
     const sig: posix.SIG = @enumFromInt(signal);
-    posix.kill(@intCast(target_abs_pid), sig) catch |err| {
+    posix.kill(@intCast(target_abstgid), sig) catch |err| {
         const errno: linux.E = switch (err) {
             error.PermissionDenied => .PERM,
             error.ProcessNotFound => .SRCH,
@@ -53,9 +63,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyErr(notif.id, errno);
     };
 
-    // Do not remove from internal procs tracking.
-    // Killing a process is just a signal invocation.
-    // exit_group is what actually removes it from procs.
+    // Do not remove from internal Threads tracking.
+    // Killing a thread is just a signal invocation.
+    // exit_group is what actually removes it from threads.
 
     return replySuccess(notif.id, 0);
 }
