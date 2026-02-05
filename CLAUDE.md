@@ -69,6 +69,7 @@ src/
         Namespace.zig   # TID namespace with refcounting, NsTid allocation
       fs/               # File descriptor virtualization
         FdTable.zig     # Per-process fd table, refcounted (shared on CLONE_FILES)
+        FdEntry.zig     # Entry type in fd table, containing pointer to File and CLOEXEC flag
         File.zig        # Virtual file with Backend union and refcounting
         backend/        # File backend implementations
           passthrough.zig # Kernel FD passthrough

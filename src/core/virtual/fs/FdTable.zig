@@ -126,9 +126,8 @@ pub fn insert_at(self: *Self, file: *File, vfd: VirtualFD, opts: struct { cloexe
 /// If newfd is already in use, caller must remove() it first.
 /// Caller must have already called file.ref() to add a reference.
 pub fn dup_at(self: *Self, file: *File, newfd: VirtualFD, opts: struct { cloexec: bool = false }) !VirtualFD {
-    // For dup, the file should already have at least 2 refs:
-    // one from the original FdEntry, one from the caller's ref() call
-    std.debug.assert(file.ref_count.load(.monotonic) >= 2);
+    // Get a new reference to the File
+    _ = file.ref();
 
     // Caller should remove() existing vfd first to avoid leaking the old File
     std.debug.assert(self.open_files.get(newfd) == null);
@@ -159,8 +158,8 @@ pub fn get_ref(self: *Self, vfd: VirtualFD) ?*File {
 /// Caller must call entry.file.unref() when done.
 /// Use this when checking the cloexec flag
 pub fn get_entry(self: *Self, vfd: VirtualFD) ?FdEntry {
-    const entry_ptr = self.open_files.get(vfd);
-    if (entry_ptr) |entry| {
+    const opt_entry = self.open_files.get(vfd);
+    if (opt_entry) |entry| {
         _ = entry.file.ref();
         return entry;
     }

@@ -23,7 +23,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         std.log.err("exit: Thread not found with tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return replyContinue(notif.id);
     };
     std.debug.assert(caller.tid == caller_tid);
 

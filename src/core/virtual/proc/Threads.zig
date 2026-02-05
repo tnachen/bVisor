@@ -60,8 +60,8 @@ pub const CloneFlags = struct {
 };
 
 /// Tracks kernel to virtual mappings, handling parent/child relationships.
-/// Note: we don't currently re-parent orphaned children to init; killing a
-/// process kills its entire subtree, including any nested Namespaces.
+/// When a non-root thread exits, its children are reparented to the namespace root (init).
+/// Killing a namespace root kills its entire subtree, including any nested Namespaces.
 allocator: Allocator,
 
 // Flat list of mappings from kernel's TID to Thread
@@ -247,8 +247,23 @@ pub fn handleThreadExit(self: *Self, tid: AbsTid) !void {
             thread.deinit(self.allocator);
         }
     } else {
-        // Not a namespace root: reparent and then remove the caller Thread
-        const new_parent = target_thread.parent;
+        // Not a namespace root: reparent children to namespace root (init), then remove the Thread
+
+        // Set the new parent Thread to be the leader of this Namespace's root Thread
+        var new_parent: ?*Thread = null;
+        var ns_iter = target_thread.namespace.threads.iterator();
+        while (ns_iter.next()) |entry| {
+            const thread = entry.value_ptr.*;
+            // Must be the root of THIS namespace, not just any namespace root visible from here
+            if (thread.namespace == target_thread.namespace and thread.isNamespaceRoot()) {
+                new_parent = try thread.thread_group.getLeader();
+                break;
+            }
+        }
+
+        if (new_parent == null) {
+            return error.NamespaceRootNotFound;
+        }
 
         // Since we don't store the immediate children of this caller Thread, have to iterate through all descendants to those needing reparenting
         var iter = target_thread.namespace.threads.iterator();
@@ -385,7 +400,7 @@ test "kill intermediate node removes subtree but preserves siblings" {
 
     // kill c (intermediate)
     // - removes c
-    // - reparents d to a (c's parent)
+    // - reparents d to a (namespace root)
     // - a and b remain unchanged
     try v_threads.handleThreadExit(c_tid);
 
@@ -424,7 +439,7 @@ test "deep nesting" {
 
     try std.testing.expectEqual(5, v_threads.lookup.count());
 
-    // kill middle (c) - only c is removed, d is reparented to b
+    // kill middle (c) - only c is removed, d is reparented to namespace root (a)
     try v_threads.handleThreadExit(tids[2]);
     try std.testing.expectEqual(4, v_threads.lookup.count());
     try std.testing.expect(v_threads.lookup.get(tids[0]) != null); // a
@@ -432,10 +447,10 @@ test "deep nesting" {
     try std.testing.expect(v_threads.lookup.get(tids[2]) == null); // c removed
     try std.testing.expect(v_threads.lookup.get(tids[3]) != null); // d reparented
     try std.testing.expect(v_threads.lookup.get(tids[4]) != null); // e
-    // d's parent should now be b
+    // d's parent should now be a (namespace root)
     const d_thread = v_threads.lookup.get(tids[3]).?;
-    const b_thread = v_threads.lookup.get(tids[1]).?;
-    try std.testing.expectEqual(b_thread, d_thread.parent.?);
+    const a_thread = v_threads.lookup.get(tids[0]).?;
+    try std.testing.expectEqual(a_thread, d_thread.parent.?);
 }
 
 test "wide tree with many siblings" {

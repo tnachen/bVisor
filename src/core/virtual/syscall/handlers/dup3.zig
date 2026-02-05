@@ -48,7 +48,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         logger.log("dup3: EBADF for oldfd={d}", .{oldfd});
         return replyErr(notif.id, .BADF);
     };
-    // Note: don't defer file.unref() here because the ref is transferred to dup_at
+    defer file.unref();
 
     // If newfd already exists, close and remove it first
     if (caller.fd_table.get_ref(newfd)) |existing| {
