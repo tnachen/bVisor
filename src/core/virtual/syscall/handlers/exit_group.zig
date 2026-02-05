@@ -36,20 +36,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         }
     }
 
-    if (caller.isNamespaceRoot()) {
-        // Namespace root exit: kill entire namespace / all descendants of the root process
-        var iter = caller.namespace.threads.iterator();
-        while (iter.next()) |entry| {
-            const thread = entry.value_ptr.*;
-            if (thread != caller) {
-                // Send SIGKILL for any descendants (which will trigger other `exit` syscalls via the kernel)
-                posix.kill(thread.tid, .KILL) catch |err| {
-                    std.log.debug("exit: posix.kill({d}) during namespace cleanup: {}", .{ thread.tid, err });
-                };
-            }
-        }
-    }
-
     // Clean up virtual Thread entry before kernel handles the exit
     // Ignore errors - Thread may have already been cleaned up
     supervisor.guest_threads.handleThreadExit(caller_tid) catch {};

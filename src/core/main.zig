@@ -18,6 +18,7 @@ test {
     _ = @import("virtual/syscall/handlers/tkill.zig");
     _ = @import("virtual/syscall/handlers/getpid.zig");
     _ = @import("virtual/syscall/handlers/getppid.zig");
+    _ = @import("virtual/syscall/handlers/gettid.zig");
     _ = @import("virtual/syscall/handlers/kill.zig");
     _ = @import("virtual/syscall/handlers/openat.zig");
     _ = @import("virtual/syscall/handlers/close.zig");
