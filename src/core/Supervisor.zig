@@ -21,7 +21,6 @@ logger: Logger,
 
 // All Thread-s starting from the initial guest Thread are assigned a virtual TID and tracked via guest_threads
 // Each Thread tracks its own virtual namespaces and file descriptors
-// TODO: decide whether this should be a pointer?
 guest_threads: Threads,
 
 // Mutex protecting the entirety of Supervisor's internal state, (Procs/Proc/Namespace/FdTable)
