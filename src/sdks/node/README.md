@@ -7,6 +7,12 @@ Node.js bindings for bVisor. Linux only.
 Requires: Zig 0.16+, Docker
 
 ```bash
-npm run dev    # builds native binaries (zig build), then runs test.ts in a linux container
+# Build native binaries (zig build), then run test.ts in a linux container
+npm run dev    
+```
+
+```bash
+# Install the latest published bvisor and run test.ts in a linux container
+npm run test:published
 ```
 
