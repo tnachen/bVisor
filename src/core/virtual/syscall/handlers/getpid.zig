@@ -17,8 +17,8 @@ const isError = @import("../../../seccomp/notif.zig").isError;
 /// getpid return the namespaced TGID of the thread
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
 
-    supervisor.mutex.lock();
-    defer supervisor.mutex.unlock();
+    supervisor.mutex.lockUncancelable(supervisor.io);
+    defer supervisor.mutex.unlock(supervisor.io);
 
     // Parse args
     const caller_tid: AbsTid = @intCast(notif.pid);

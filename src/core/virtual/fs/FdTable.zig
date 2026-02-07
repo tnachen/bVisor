@@ -470,9 +470,12 @@ test "insert 1000 files returns all unique VFDs and all retrievable" {
     const table = try Self.init(testing.allocator);
     defer table.unref();
 
+    // Start from fd=1000 to avoid closing real fds (0=stdin, 1=stdout, 2=stderr)
+    // during File.deinit cleanup
+    const fd_offset = 1000;
     var vfds: [1000]VirtualFD = undefined;
     for (0..1000) |i| {
-        const fd: posix.fd_t = @intCast(i);
+        const fd: posix.fd_t = @intCast(fd_offset + i);
         vfds[i] = try table.insert(try File.init(testing.allocator, .{ .passthrough = .{ .fd = fd } }), .{});
     }
 
@@ -485,7 +488,7 @@ test "insert 1000 files returns all unique VFDs and all retrievable" {
         const retrieved = table.get_ref(vfds[i]);
         defer if (retrieved) |f| f.unref();
         try testing.expect(retrieved != null);
-        try testing.expectEqual(@as(i32, @intCast(i)), retrieved.?.backend.passthrough.fd);
+        try testing.expectEqual(@as(i32, @intCast(fd_offset + i)), retrieved.?.backend.passthrough.fd);
     }
 }
 

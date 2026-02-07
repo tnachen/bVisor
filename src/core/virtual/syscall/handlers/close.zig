@@ -23,8 +23,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     var file: *File = undefined;
     {
-        supervisor.mutex.lock();
-        defer supervisor.mutex.unlock();
+        supervisor.mutex.lockUncancelable(supervisor.io);
+        defer supervisor.mutex.unlock(supervisor.io);
 
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
@@ -42,10 +42,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         // Our stack-local ref stays alive until unref'ed
         _ = caller.fd_table.remove(fd);
     }
-    defer file.unref();
-
-    // File close happens outside the lock since already removed from fd_table
-    file.close();
+    defer file.unref(); // Backend close happens automatically when last ref drops
 
     logger.log("close: closed fd={d}", .{fd});
     return replySuccess(notif.id, 0);

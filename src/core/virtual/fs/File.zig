@@ -48,6 +48,7 @@ pub fn unref(self: *Self) void {
 }
 
 fn deinit(self: *Self) void {
+    self.close();
     self.allocator.destroy(self);
 }
 
@@ -69,7 +70,7 @@ pub fn write(self: *Self, data: []const u8) !usize {
     }
 }
 
-pub fn close(self: *Self) void {
+fn close(self: *Self) void {
     switch (self.backend) {
         .passthrough => |*f| f.close(),
         .cow => |*f| f.close(),

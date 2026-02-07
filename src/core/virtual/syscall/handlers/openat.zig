@@ -62,8 +62,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             // Special case: if we're in the /proc filepath
             // We need to sync guest_threads with the kernel to ensure all current PIDs are registered
             if (backend == .proc) {
-                supervisor.mutex.lock();
-                defer supervisor.mutex.unlock();
+                supervisor.mutex.lockUncancelable(supervisor.io);
+                defer supervisor.mutex.unlock(supervisor.io);
 
                 supervisor.guest_threads.syncNewThreads() catch |err| {
                     logger.log("openat: syncNewThreads failed: {}", .{err});
@@ -99,8 +99,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
                     .proc = blk: {
                         // Special case: the open of ProcFile requires passing in the caller
                         // So we need a critical section since get does lazy registration
-                        supervisor.mutex.lock();
-                        defer supervisor.mutex.unlock();
+                        supervisor.mutex.lockUncancelable(supervisor.io);
+                        defer supervisor.mutex.unlock(supervisor.io);
 
                         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
                             logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
@@ -123,8 +123,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             // note there's subtle complexity here for the .proc case
             // since we're re-acquiring the lock and a new instance of a caller *Thread
 
-            supervisor.mutex.lock();
-            defer supervisor.mutex.unlock();
+            supervisor.mutex.lockUncancelable(supervisor.io);
+            defer supervisor.mutex.unlock(supervisor.io);
 
             const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
                 logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });

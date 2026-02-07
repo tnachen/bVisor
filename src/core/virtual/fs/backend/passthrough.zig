@@ -20,8 +20,10 @@ pub const Passthrough = struct {
         return posix.write(self.fd, data);
     }
 
+    // Use system.close instead of posix.close: posix.close panics on EBADF,
+    // but tests create Files with fake fds that were never opened.
     pub fn close(self: *Passthrough) void {
-        posix.close(self.fd);
+        _ = std.posix.system.close(self.fd);
     }
 };
 

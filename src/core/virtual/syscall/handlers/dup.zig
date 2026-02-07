@@ -13,8 +13,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const caller_tid: AbsTid = @intCast(notif.pid);
     const oldfd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
 
-    supervisor.mutex.lock();
-    defer supervisor.mutex.unlock();
+    supervisor.mutex.lockUncancelable(supervisor.io);
+    defer supervisor.mutex.unlock(supervisor.io);
 
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
