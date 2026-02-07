@@ -9,6 +9,7 @@ const Result = types.LinuxResult;
 const Logger = types.Logger;
 const Threads = @import("virtual/proc/Threads.zig");
 const OverlayRoot = @import("virtual/OverlayRoot.zig");
+const LogBuffer = @import("LogBuffer.zig");
 const Allocator = std.mem.Allocator;
 
 const Self = @This();
@@ -24,11 +25,14 @@ logger: Logger,
 guest_threads: Threads,
 
 // Mutex protecting the entirety of Supervisor's internal state, (Procs/Proc/Namespace/FdTable)
-// This is the simplest, dumbest implementation, will optimize over time.
-mutex: std.Thread.Mutex = .{},
+// Io.Mutex yields instead of blocking OS threads, compatible with Io async workers.
+mutex: Io.Mutex = .init,
 
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
+
+// Log buffer for stdout/stderr
+log_buffer: LogBuffer,
 
 pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t) !Self {
     const logger = Logger.init(.supervisor);
@@ -43,6 +47,7 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid:
     return .{
         .allocator = allocator,
         .io = io,
+        .log_buffer = .init(allocator),
         .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
         .logger = logger,
@@ -62,11 +67,13 @@ fn generateUid() [16]u8 {
 }
 
 pub fn deinit(self: *Self) void {
+    self.log_buffer.flushAll(self.io);
     if (self.notify_fd >= 0) {
         posix.close(self.notify_fd);
     }
     self.guest_threads.deinit();
     self.overlay.deinit();
+    self.log_buffer.deinit();
 }
 
 pub fn run(self: *Self) !void {

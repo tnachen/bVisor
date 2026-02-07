@@ -25,18 +25,49 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
 
-    // Continue in case of stdout or stderr
-    // TODO: virtualize this ourselves for more control of where logs go
+    // Virtualize stdout/stderr: gather iovecs and capture into log buffer
     if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
-        return replyContinue(notif.id);
+        var stdio_iovecs: [MAX_IOV]posix.iovec_const = undefined;
+        var stdio_buf: [4096]u8 = undefined;
+        var stdio_len: usize = 0;
+
+        for (0..iovec_count) |i| {
+            const iov_addr = iovec_ptr + i * @sizeOf(posix.iovec_const);
+            stdio_iovecs[i] = memory_bridge.read(posix.iovec_const, caller_tid, iov_addr) catch {
+                return replyErr(notif.id, .FAULT);
+            };
+        }
+
+        for (0..iovec_count) |i| {
+            const iov = stdio_iovecs[i];
+            const buf_ptr = @intFromPtr(iov.base);
+            const buf_len = @min(iov.len, stdio_buf.len - stdio_len);
+            if (buf_len > 0) {
+                memory_bridge.readSlice(stdio_buf[stdio_len..][0..buf_len], caller_tid, buf_ptr) catch {
+                    return replyErr(notif.id, .FAULT);
+                };
+                stdio_len += buf_len;
+            }
+        }
+
+        if (fd == linux.STDOUT_FILENO) {
+            supervisor.log_buffer.writeStdout(supervisor.io, stdio_buf[0..stdio_len]) catch {
+                return replyErr(notif.id, .IO);
+            };
+        } else {
+            supervisor.log_buffer.writeStderr(supervisor.io, stdio_buf[0..stdio_len]) catch {
+                return replyErr(notif.id, .IO);
+            };
+        }
+        return replySuccess(notif.id, @intCast(stdio_len));
     }
 
     // Critical section: File lookup
     // File refcounting allows us to keep a pointer to the file outside of the critical section
     var file: *File = undefined;
     {
-        supervisor.mutex.lock();
-        defer supervisor.mutex.unlock();
+        supervisor.mutex.lockUncancelable(supervisor.io);
+        defer supervisor.mutex.unlock(supervisor.io);
 
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
@@ -158,10 +189,11 @@ test "writev multiple iovecs concatenated write" {
     try testing.expectEqual(@as(i64, 11), resp.val);
 }
 
-test "writev FD 1 (stdout) returns replyContinue" {
+test "writev FD 1 (stdout) captures into log buffer" {
     const allocator = testing.allocator;
+    const io = testing.io;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
     defer supervisor.deinit();
 
     const data = "hello";
@@ -177,13 +209,15 @@ test "writev FD 1 (stdout) returns replyContinue" {
     });
 
     const resp = handle(notif, &supervisor);
-    try testing.expect(isContinue(resp));
+    try testing.expect(!isError(resp));
+    try testing.expectEqual(@as(i64, 5), resp.val);
 }
 
-test "writev FD 2 (stderr) returns replyContinue" {
+test "writev FD 2 (stderr) captures into log buffer" {
     const allocator = testing.allocator;
+    const io = testing.io;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
     defer supervisor.deinit();
 
     const data = "error";
@@ -199,7 +233,67 @@ test "writev FD 2 (stderr) returns replyContinue" {
     });
 
     const resp = handle(notif, &supervisor);
-    try testing.expect(isContinue(resp));
+    try testing.expect(!isError(resp));
+    try testing.expectEqual(@as(i64, 5), resp.val);
+}
+
+test "writev stdout: write, write, drain, write, drain" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    const init_tid: AbsTid = 100;
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
+    defer supervisor.deinit();
+
+    // writev "hel" + "lo "
+    const d1a = "hel";
+    const d1b = "lo ";
+    var iovecs1 = [_]posix.iovec_const{
+        .{ .base = d1a.ptr, .len = d1a.len },
+        .{ .base = d1b.ptr, .len = d1b.len },
+    };
+    const r1 = handle(makeNotif(.writev, .{
+        .pid = init_tid,
+        .arg0 = 1,
+        .arg1 = @intFromPtr(&iovecs1),
+        .arg2 = 2,
+    }), &supervisor);
+    try testing.expect(!isError(r1));
+
+    // writev "world"
+    const d2 = "world";
+    var iovecs2 = [_]posix.iovec_const{
+        .{ .base = d2.ptr, .len = d2.len },
+    };
+    const r2 = handle(makeNotif(.writev, .{
+        .pid = init_tid,
+        .arg0 = 1,
+        .arg1 = @intFromPtr(&iovecs2),
+        .arg2 = 1,
+    }), &supervisor);
+    try testing.expect(!isError(r2));
+
+    // drain — should see "hel" + "lo " + "world"
+    const drain1 = try supervisor.log_buffer.readStdout(io, allocator);
+    defer allocator.free(drain1);
+    try testing.expectEqualStrings("hello world", drain1);
+
+    // writev "!"
+    const d3 = "!";
+    var iovecs3 = [_]posix.iovec_const{
+        .{ .base = d3.ptr, .len = d3.len },
+    };
+    const r3 = handle(makeNotif(.writev, .{
+        .pid = init_tid,
+        .arg0 = 1,
+        .arg1 = @intFromPtr(&iovecs3),
+        .arg2 = 1,
+    }), &supervisor);
+    try testing.expect(!isError(r3));
+
+    // drain — should see only "!"
+    const drain2 = try supervisor.log_buffer.readStdout(io, allocator);
+    defer allocator.free(drain2);
+    try testing.expectEqualStrings("!", drain2);
 }
 
 test "writev non-existent VFD returns EBADF" {

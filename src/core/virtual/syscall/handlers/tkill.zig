@@ -24,8 +24,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Critical section just to normalize target namespaced TID to absolute TID
     var target_abs_tid: AbsTid = undefined;
     {
-        supervisor.mutex.lock();
-        defer supervisor.mutex.unlock();
+        supervisor.mutex.lockUncancelable(supervisor.io);
+        defer supervisor.mutex.unlock(supervisor.io);
 
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
