@@ -50,9 +50,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     };
     defer file.unref();
 
-    // If newfd already exists, close and remove it first
+    // If newfd already exists, remove it (close happens on last unref via File.deinit)
     if (caller.fd_table.get_ref(newfd)) |existing| {
-        existing.close();
         existing.unref();
         _ = caller.fd_table.remove(newfd);
     }
