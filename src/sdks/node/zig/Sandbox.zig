@@ -38,7 +38,14 @@ pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_v
     errdefer if (stderr_stream) |s| s.deinit(napi.allocator);
 
     // Run in seccomp — fills the LogBuffers inside stdout/stderr Streams
-    core.execute(self.uid, core.smokeTest, &stdout_stream.?.buffer, &stderr_stream.?.buffer) catch |err| {
+    core.execute(
+        napi.allocator,
+        io,
+        self.uid,
+        core.smokeTest,
+        &stdout_stream.?.buffer,
+        &stderr_stream.?.buffer,
+    ) catch |err| {
         std.log.err("execute failed: {s}", .{@errorName(err)});
         return null;
     };
