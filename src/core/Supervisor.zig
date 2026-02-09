@@ -33,10 +33,10 @@ overlay: OverlayRoot,
 
 // Log buffers for stdout/stderr
 // Owned by the runCmd invocation in SDK
-stdout_buffer: *LogBuffer,
-stderr_buffer: *LogBuffer,
+stdout: *LogBuffer,
+stderr: *LogBuffer,
 
-pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout_buffer: *LogBuffer, stderr_buffer: *LogBuffer) !Self {
+pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout: *LogBuffer, stderr: *LogBuffer) !Self {
     const logger = Logger.init(.supervisor);
     var guest_threads = Threads.init(allocator);
     errdefer guest_threads.deinit();
@@ -49,8 +49,8 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid:
     return .{
         .allocator = allocator,
         .io = io,
-        .stdout_buffer = stdout_buffer,
-        .stderr_buffer = stderr_buffer,
+        .stdout = stdout,
+        .stderr = stderr,
         .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
         .logger = logger,

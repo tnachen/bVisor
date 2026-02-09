@@ -37,11 +37,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             return replyErr(notif.id, .FAULT);
         };
         if (fd == linux.STDOUT_FILENO) {
-            supervisor.stdout_buffer.write(supervisor.io, buf) catch {
+            supervisor.stdout.write(supervisor.io, buf) catch {
                 return replyErr(notif.id, .IO);
             };
         } else {
-            supervisor.stderr_buffer.write(supervisor.io, buf) catch {
+            supervisor.stderr.write(supervisor.io, buf) catch {
                 return replyErr(notif.id, .IO);
             };
         }
@@ -180,7 +180,7 @@ test "write stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r2));
 
     // drain — should see "aaabbb"
-    const drain1 = try supervisor.stdout_buffer.read(io, allocator);
+    const drain1 = try supervisor.stdout.read(io, allocator);
     defer allocator.free(drain1);
     try testing.expectEqualStrings("aaabbb", drain1);
 
@@ -195,7 +195,7 @@ test "write stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r3));
 
     // drain — should see only "ccc"
-    const drain2 = try supervisor.stdout_buffer.read(io, allocator);
+    const drain2 = try supervisor.stdout.read(io, allocator);
     defer allocator.free(drain2);
     try testing.expectEqualStrings("ccc", drain2);
 }

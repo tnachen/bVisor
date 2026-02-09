@@ -51,11 +51,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         }
 
         if (fd == linux.STDOUT_FILENO) {
-            supervisor.stdout_buffer.write(supervisor.io, stdio_buf[0..stdio_len]) catch {
+            supervisor.stdout.write(supervisor.io, stdio_buf[0..stdio_len]) catch {
                 return replyErr(notif.id, .IO);
             };
         } else {
-            supervisor.stderr_buffer.write(supervisor.io, stdio_buf[0..stdio_len]) catch {
+            supervisor.stderr.write(supervisor.io, stdio_buf[0..stdio_len]) catch {
                 return replyErr(notif.id, .IO);
             };
         }
@@ -298,7 +298,7 @@ test "writev stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r2));
 
     // drain — should see "hel" + "lo " + "world"
-    const drain1 = try supervisor.stdout_buffer.read(io, allocator);
+    const drain1 = try supervisor.stdout.read(io, allocator);
     defer allocator.free(drain1);
     try testing.expectEqualStrings("hello world", drain1);
 
@@ -316,7 +316,7 @@ test "writev stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r3));
 
     // drain — should see only "!"
-    const drain2 = try supervisor.stdout_buffer.read(io, allocator);
+    const drain2 = try supervisor.stdout.read(io, allocator);
     defer allocator.free(drain2);
     try testing.expectEqualStrings("!", drain2);
 }
