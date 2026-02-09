@@ -3,6 +3,7 @@ const c = napi.c;
 const std = @import("std");
 const core = @import("core");
 const LogBuffer = core.LogBuffer;
+const Stream = @import("Stream.zig").Stream;
 
 const Self = @This();
 
@@ -55,32 +56,3 @@ pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_v
 
     return result;
 }
-
-pub const Stream = struct {
-    io: std.Io,
-    buffer: LogBuffer,
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !*Stream {
-        const self = try allocator.create(Stream);
-        self.* = .{ .io = io, .buffer = LogBuffer.init(allocator) };
-        return self;
-    }
-
-    pub fn deinit(self: *Stream, allocator: std.mem.Allocator) void {
-        self.buffer.deinit();
-        allocator.destroy(self);
-    }
-
-    /// Returns JS type (Uint8array | none)
-    pub fn next(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
-        const self = napi.ZigExternal(Stream).unwrap(env, info) catch return null;
-
-        const data = self.buffer.read(self.io, napi.allocator) catch |err| {
-            std.log.err("streamNext failed: {s}", .{@errorName(err)});
-            return null;
-        };
-        defer napi.allocator.free(data);
-        if (data.len == 0) return null;
-        return napi.createUint8Array(env, data.ptr, data.len) catch return null;
-    }
-};
