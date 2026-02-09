@@ -36,13 +36,12 @@ overlay: OverlayRoot,
 stdout: *LogBuffer,
 stderr: *LogBuffer,
 
-pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout: *LogBuffer, stderr: *LogBuffer) !Self {
+pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout: *LogBuffer, stderr: *LogBuffer) !Self {
     const logger = Logger.init(.supervisor);
     var guest_threads = Threads.init(allocator);
     errdefer guest_threads.deinit();
     _ = try guest_threads.handleInitialThread(init_guest_tid);
 
-    const uid = generateUid();
     var overlay = try OverlayRoot.init(io, uid);
     errdefer overlay.deinit();
 
@@ -57,16 +56,6 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid:
         .guest_threads = guest_threads,
         .overlay = overlay,
     };
-}
-
-fn generateUid() [16]u8 {
-    var uid_bytes: [8]u8 = undefined;
-    if (builtin.is_test) {
-        @memcpy(&uid_bytes, "testtest");
-    } else {
-        std.crypto.random.bytes(&uid_bytes);
-    }
-    return std.fmt.bytesToHex(uid_bytes, .lower);
 }
 
 pub fn deinit(self: *Self) void {

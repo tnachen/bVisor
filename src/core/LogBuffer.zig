@@ -30,7 +30,7 @@ pub fn write(self: *Self, io: Io, data: []const u8) !void {
 
 /// Drain stdout buffer: returns a copy of accumulated data and clears the buffer.
 /// Caller owns the returned slice.
-pub fn read(self: *Self, io: Io, allocator: Allocator) ![]u8 {
+pub fn read(self: *Self, allocator: Allocator, io: Io) ![]u8 {
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
     const data = self.backing.written();

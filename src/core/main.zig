@@ -2,7 +2,8 @@ const std = @import("std");
 const types = @import("types.zig"); // ERIK TODO: kitchen sink utils, think about what else we could do here
 const Logger = types.Logger;
 const LogBuffer = @import("LogBuffer.zig");
-const execute = @import("setup.zig").execute;
+const setup = @import("setup.zig");
+const execute = setup.execute;
 const smokeTest = @import("smoke_test.zig").smokeTest;
 
 test {
@@ -50,5 +51,5 @@ pub fn main() !void {
     defer stdout.deinit();
     defer stderr.deinit();
 
-    try execute(smokeTest, &stdout, &stderr);
+    try execute(setup.generateUid(), smokeTest, &stdout, &stderr);
 }

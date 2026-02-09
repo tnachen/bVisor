@@ -26,7 +26,7 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 pub fn next(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
     const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
 
-    const data = self.buffer.read(self.io, napi.allocator) catch |err| {
+    const data = self.buffer.read(napi.allocator, self.io) catch |err| {
         std.log.err("streamNext failed: {s}", .{@errorName(err)});
         return null;
     };
