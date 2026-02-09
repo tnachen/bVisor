@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const Io = std.Io;
@@ -20,15 +19,15 @@ pub fn deinit(self: *Self) void {
     self.backing.deinit();
 }
 
-/// Write data to stdout buffer.
-/// Awaits internal mutex
+/// Append data to buffer.
+/// Awaits internal mutex.
 pub fn write(self: *Self, io: Io, data: []const u8) !void {
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
     try self.backing.writer.writeAll(data);
 }
 
-/// Drain stdout buffer: returns a copy of accumulated data and clears the buffer.
+/// Drain buffer: returns a copy of accumulated data and clears the buffer.
 /// Caller owns the returned slice.
 pub fn read(self: *Self, allocator: Allocator, io: Io) ![]u8 {
     self.mutex.lockUncancelable(io);
@@ -45,7 +44,7 @@ pub fn len(self: *Self, io: Io) usize {
     return self.backing.written().len;
 }
 
-/// Drain buffer to its respective destination
+/// Drain buffer to a file.
 pub fn flush(self: *Self, io: Io, file: File) void {
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
@@ -53,4 +52,52 @@ pub fn flush(self: *Self, io: Io, file: File) void {
     var w = file.writerStreaming(io, &data);
     w.interface.writeAll(data) catch {};
     w.interface.flush() catch {};
+}
+
+test "write and read" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf = Self.init(allocator);
+    defer buf.deinit();
+
+    try buf.write(io, "hello");
+    try std.testing.expectEqual(5, buf.len(io));
+
+    const data = try buf.read(allocator, io);
+    defer allocator.free(data);
+    try std.testing.expectEqualStrings("hello", data);
+
+    try std.testing.expectEqual(0, buf.len(io));
+}
+
+test "read returns independent copy" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf = Self.init(allocator);
+    defer buf.deinit();
+
+    try buf.write(io, "before");
+    const copy = try buf.read(allocator, io);
+    defer allocator.free(copy);
+
+    try buf.write(io, " after");
+
+    try std.testing.expectEqualStrings("before", copy);
+}
+
+test "successive drains" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var buf = Self.init(allocator);
+    defer buf.deinit();
+
+    try buf.write(io, "first");
+    const d1 = try buf.read(allocator, io);
+    defer allocator.free(d1);
+    try std.testing.expectEqualStrings("first", d1);
+
+    try buf.write(io, "second");
+    const d2 = try buf.read(allocator, io);
+    defer allocator.free(d2);
+    try std.testing.expectEqualStrings("second", d2);
 }
