@@ -623,7 +623,11 @@ test "unknown PID returns ESRCH across all handlers" {
 test "fstat on proc file writes correct struct stat" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     // Open /proc/self
@@ -660,7 +664,11 @@ test "fstat on proc file writes correct struct stat" {
 test "fstat on stdio fd returns continue" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var stat_buf: Stat = std.mem.zeroes(Stat);
@@ -685,7 +693,11 @@ test "fstat on stdio fd returns continue" {
 test "fstat on unknown VFD returns EBADF" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var stat_buf: Stat = std.mem.zeroes(Stat);

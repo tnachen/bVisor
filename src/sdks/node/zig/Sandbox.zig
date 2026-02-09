@@ -3,7 +3,7 @@ const c = napi.c;
 const std = @import("std");
 const core = @import("core");
 const LogBuffer = core.LogBuffer;
-const Stream = @import("Stream.zig").Stream;
+const Stream = @import("Stream.zig");
 
 const Self = @This();
 
