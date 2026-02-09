@@ -33,6 +33,12 @@ pub fn build(b: *std.Build) void {
             .abi = platform.abi,
         });
 
+        const core_module = b.createModule(.{
+            .root_source_file = b.path("src/core/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
         const node_lib = b.addLibrary(.{
             .name = "libbvisor",
             .linkage = .dynamic,
@@ -43,6 +49,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
+        node_lib.root_module.addImport("core", core_module);
         node_lib.root_module.addIncludePath(node_api.path("include"));
         node_lib.linker_allow_shlib_undefined = true;
 
