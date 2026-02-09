@@ -37,11 +37,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             return replyErr(notif.id, .FAULT);
         };
         if (fd == linux.STDOUT_FILENO) {
-            supervisor.log_buffer.writeStdout(supervisor.io, buf) catch {
+            supervisor.stdout_buffer.write(supervisor.io, buf) catch {
                 return replyErr(notif.id, .IO);
             };
         } else {
-            supervisor.log_buffer.writeStderr(supervisor.io, buf) catch {
+            supervisor.stderr_buffer.write(supervisor.io, buf) catch {
                 return replyErr(notif.id, .IO);
             };
         }
@@ -98,10 +98,15 @@ const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
 const Tmp = @import("../../fs/backend/tmp.zig").Tmp;
 
 test "write to FD 1 (stdout) captures into log buffer" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const io = testing.io;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var data = "hello".*;
@@ -118,10 +123,15 @@ test "write to FD 1 (stdout) captures into log buffer" {
 }
 
 test "write to FD 2 (stderr) captures into log buffer" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const io = testing.io;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var data = "error".*;
@@ -138,10 +148,15 @@ test "write to FD 2 (stderr) captures into log buffer" {
 }
 
 test "write stdout: write, write, drain, write, drain" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const io = testing.io;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     // write "aaa"
@@ -165,7 +180,7 @@ test "write stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r2));
 
     // drain — should see "aaabbb"
-    const drain1 = try supervisor.log_buffer.readStdout(io, allocator);
+    const drain1 = try supervisor.stdout_buffer.read(io, allocator);
     defer allocator.free(drain1);
     try testing.expectEqualStrings("aaabbb", drain1);
 
@@ -180,15 +195,20 @@ test "write stdout: write, write, drain, write, drain" {
     try testing.expect(!isError(r3));
 
     // drain — should see only "ccc"
-    const drain2 = try supervisor.log_buffer.readStdout(io, allocator);
+    const drain2 = try supervisor.stdout_buffer.read(io, allocator);
     defer allocator.free(drain2);
     try testing.expectEqualStrings("ccc", drain2);
 }
 
 test "write count=0 returns 0" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     // Create a tmp file to write to
@@ -210,9 +230,14 @@ test "write count=0 returns 0" {
 }
 
 test "write to non-existent VFD returns EBADF" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var data = "hello".*;
@@ -229,9 +254,14 @@ test "write to non-existent VFD returns EBADF" {
 }
 
 test "write with unknown caller PID returns ESRCH" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var data = "hello".*;
@@ -248,9 +278,14 @@ test "write with unknown caller PID returns ESRCH" {
 }
 
 test "write to read-only backend (proc) returns EIO" {
+    const LogBuffer = @import("../../../LogBuffer.zig");
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;

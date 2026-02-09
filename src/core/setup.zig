@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const seccomp = @import("seccomp/filter.zig");
 const Logger = types.Logger;
 const Supervisor = @import("Supervisor.zig");
+const LogBuffer = @import("LogBuffer.zig");
 
 // comptime dependency injection
 const deps = @import("deps/deps.zig");
@@ -55,7 +56,12 @@ fn supervisorProcess(init_guest_pid: linux.pid_t) !void {
 
     const notify_fd = try lookupGuestFd(init_guest_pid, guest_notify_fd, io);
 
-    var supervisor = try Supervisor.init(gpa, io, notify_fd, init_guest_pid);
+    var stdout_buffer = LogBuffer.init(gpa);
+    var stderr_buffer = LogBuffer.init(gpa);
+    defer stdout_buffer.deinit();
+    defer stderr_buffer.deinit();
+
+    var supervisor = try Supervisor.init(gpa, io, notify_fd, init_guest_pid, &stdout_buffer, &stderr_buffer);
     defer supervisor.deinit();
     try supervisor.run();
 }

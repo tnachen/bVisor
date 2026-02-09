@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Supervisor = @import("../../../Supervisor.zig");
+const LogBuffer = @import("../../../LogBuffer.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const AbsTgid = Thread.AbsTgid;
@@ -49,7 +50,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 test "getppid for init Thread returns 0" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 12345;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     const notif = makeNotif(.getppid, .{ .pid = init_tid });
@@ -61,7 +66,11 @@ test "getppid for init Thread returns 0" {
 test "getppid for child returns parent's AbsTgid" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     // Add a child Thread
@@ -80,7 +89,11 @@ test "getppid for child returns parent's AbsTgid" {
 test "getppid for grandchild returns parent's AbsTgid" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     // Create: init(100) -> child(200) -> grandchild(300)

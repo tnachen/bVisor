@@ -31,10 +31,12 @@ mutex: Io.Mutex = .init,
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
 
-// Log buffer for stdout/stderr
-log_buffer: LogBuffer,
+// Log buffers for stdout/stderr
+// Owned by the runCmd invocation in SDK
+stdout_buffer: *LogBuffer,
+stderr_buffer: *LogBuffer,
 
-pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t) !Self {
+pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout_buffer: *LogBuffer, stderr_buffer: *LogBuffer) !Self {
     const logger = Logger.init(.supervisor);
     var guest_threads = Threads.init(allocator);
     errdefer guest_threads.deinit();
@@ -47,7 +49,8 @@ pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid:
     return .{
         .allocator = allocator,
         .io = io,
-        .log_buffer = .init(allocator),
+        .stdout_buffer = stdout_buffer,
+        .stderr_buffer = stderr_buffer,
         .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
         .logger = logger,
@@ -67,13 +70,12 @@ fn generateUid() [16]u8 {
 }
 
 pub fn deinit(self: *Self) void {
-    self.log_buffer.flushAll(self.io);
     if (self.notify_fd >= 0) {
         posix.close(self.notify_fd);
     }
     self.guest_threads.deinit();
     self.overlay.deinit();
-    self.log_buffer.deinit();
+    // LogBuffers are owned by caller, not freed here
 }
 
 pub fn run(self: *Self) !void {

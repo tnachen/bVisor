@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const Supervisor = @import("../../../Supervisor.zig");
+const LogBuffer = @import("../../../LogBuffer.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const AbsTgid = Thread.AbsTgid;
@@ -72,7 +73,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 test "kill with negative pid returns EINVAL" {
     const allocator = testing.allocator;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, 100);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, 100, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     const notif = makeNotif(.kill, .{
@@ -88,7 +93,11 @@ test "kill with negative pid returns EINVAL" {
 
 test "kill with zero pid returns EINVAL" {
     const allocator = testing.allocator;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, 100);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, -1, 100, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     const notif = makeNotif(.kill, .{

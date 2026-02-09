@@ -9,10 +9,9 @@ const smokeTest = core.smokeTest;
 const seccomp = core.seccomp;
 const lookupGuestFd = core.lookupGuestFdWithRetry;
 const Logger = core.Logger;
+const LogBuffer = core.LogBuffer;
 
 const Self = @This();
-
-active_supervisor: ?Supervisor = null,
 
 // Lifecycle helpers expect init/deinit
 pub fn init(allocator: std.mem.Allocator) !*Self {
@@ -25,7 +24,7 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
     allocator.destroy(self);
 }
 
-fn supervisorProcess(self: *Self, init_guest_tid: linux.pid_t, expected_notify_fd: linux.fd_t) !void {
+fn supervisorProcess(init_guest_tid: linux.pid_t, expected_notify_fd: linux.fd_t, stdout: *Stream, stderr: *Stream) !void {
     const logger = Logger.init(.supervisor);
     logger.log("Supervisor process starting", .{});
     defer logger.log("Supervisor process exiting", .{});
@@ -40,9 +39,10 @@ fn supervisorProcess(self: *Self, init_guest_tid: linux.pid_t, expected_notify_f
 
     const notify_fd = try lookupGuestFd(init_guest_tid, expected_notify_fd, io);
 
-    var supervisor = try Supervisor.init(gpa, io, notify_fd, init_guest_tid);
+    var supervisor = try Supervisor.init(gpa, io, notify_fd, init_guest_tid, &stdout.core_buffer, &stderr.core_buffer);
     defer supervisor.deinit();
-    self.active_supervisor = supervisor;
+    // Runs until complete
+    // Supervisor discarded after
     try supervisor.run();
 }
 
@@ -55,44 +55,40 @@ fn guestProcess(expected_notify_fd: linux.fd_t) !void {
     linux.exit(0);
 }
 
+pub fn execute(stdout: *Stream, stderr: *Stream) !void {
+    // Probe the next available FD: dup gives the lowest free FD, then close it.
+    // After fork, seccomp.install() in the child will allocate the same FD number.
+    // This will race with other noise in the env, and is a temp solution
+    const expected_notify_fd = try posix.dup(0);
+    posix.close(expected_notify_fd);
+
+    // Setup supervisor and smoke test guest process
+    const fork_result = try posix.fork();
+    if (fork_result == 0) {
+        try guestProcess(expected_notify_fd);
+    } else {
+        const init_guest_tid: linux.pid_t = fork_result;
+        try supervisorProcess(init_guest_tid, expected_notify_fd, stdout, stderr);
+    }
+}
+
 // Public API must follow napi interface
 // Returns JS type (RunCmdResult)
 pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
     const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
+    _ = self;
 
-    // Probe the next available FD: dup gives the lowest free FD, then close it.
-    // After fork, seccomp.install() in the child will allocate the same FD number.
-    const expected_notify_fd = posix.dup(0) catch |err| {
-        std.log.err("dup probe failed: {s}", .{@errorName(err)});
-        return null;
-    };
-    posix.close(expected_notify_fd);
-
-    // Setup supervisor and smoke test guest process
-    const fork_result = posix.fork() catch |err| {
-        std.log.err("Fork failed: {s}", .{@errorName(err)});
-        linux.exit(1);
-    };
-    if (fork_result == 0) {
-        guestProcess(expected_notify_fd) catch |err| {
-            std.log.err("Guest process failed: {s}", .{@errorName(err)});
-            linux.exit(1);
-        };
-        unreachable; // Guest process is responsible for exiting
-    } else {
-        const init_guest_tid: linux.pid_t = fork_result;
-        supervisorProcess(self, init_guest_tid, expected_notify_fd) catch |err| {
-            std.log.err("Supervisor process failed: {s}", .{@errorName(err)});
-            linux.exit(1);
-        };
-        // runs until complete
-    }
-
-    // TODO: actually run command
+    // Allocate stdout and stderr buffers for this run, owned by node
     var stdout: ?*Stream = Stream.init(napi.allocator) catch return null;
     errdefer if (stdout) |s| s.deinit(napi.allocator);
     var stderr: ?*Stream = Stream.init(napi.allocator) catch return null;
     errdefer if (stderr) |s| s.deinit(napi.allocator);
+
+    // Run in seccomp — fills the LogBuffers inside stdout/stderr Streams
+    execute(stdout.?, stderr.?) catch |err| {
+        std.log.err("execute failed: {s}", .{@errorName(err)});
+        return null;
+    };
 
     // Wrap into externals - after wrap(), JS owns the memory via GC finalizer
     const stdoutExternal = napi.ZigExternal(Stream).wrap(env, stdout.?) catch return null;
@@ -115,13 +111,16 @@ pub const Stream = struct {
     content: []const u8 = "a b c d e f g h i j k l m n o p q r s t u v w x y z",
     cursor: usize = 0,
 
+    core_buffer: LogBuffer,
+
     pub fn init(allocator: std.mem.Allocator) !*Stream {
         const self = try allocator.create(Stream);
-        self.* = .{};
+        self.* = .{ .core_buffer = LogBuffer.init(allocator) };
         return self;
     }
 
     pub fn deinit(self: *Stream, allocator: std.mem.Allocator) void {
+        self.core_buffer.deinit();
         allocator.destroy(self);
     }
 
