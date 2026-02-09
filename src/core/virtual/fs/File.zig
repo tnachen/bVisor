@@ -85,7 +85,6 @@ fn close(self: *Self) void {
     }
 }
 
-<<<<<<< Updated upstream
 pub fn statx(self: *Self) !linux.Statx {
     switch (self.backend) {
         .passthrough => |*f| return f.statx(),
@@ -155,7 +154,6 @@ pub fn statxToStat(sx: linux.Statx) Stat {
 
     return st;
 }
-=======
 pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
     switch (self.backend) {
         .passthrough => |*f| return f.lseek(offset, whence),
@@ -164,4 +162,3 @@ pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
         .proc => |*f| return f.lseek(offset, whence),
     }
 }
->>>>>>> Stashed changes
