@@ -1,10 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const posix = std.posix;
-const types = @import("../../../types.zig");
+const types = @import("../types.zig");
 const Result = types.LinuxResult;
 
 pub inline fn lookupGuestFd(child_pid: linux.pid_t, local_fd: linux.fd_t) !linux.fd_t {
+    if (comptime builtin.is_test) return local_fd;
+
     const child_fd_table: linux.fd_t = try Result(linux.fd_t).from(
         linux.pidfd_open(child_pid, 0),
     ).unwrap();
@@ -15,6 +18,8 @@ pub inline fn lookupGuestFd(child_pid: linux.pid_t, local_fd: linux.fd_t) !linux
 }
 
 pub inline fn lookupGuestFdWithRetry(child_pid: linux.pid_t, local_fd: linux.fd_t, io: std.Io) !linux.fd_t {
+    if (comptime builtin.is_test) return local_fd;
+
     const child_fd_table: linux.fd_t = try Result(linux.fd_t).from(
         linux.pidfd_open(child_pid, 0),
     ).unwrap();
@@ -27,7 +32,7 @@ pub inline fn lookupGuestFdWithRetry(child_pid: linux.pid_t, local_fd: linux.fd_
             .Error => |err| switch (err) {
                 .BADF => {
                     // FD doesn't exist yet in child - retry
-                    // ERIK TODO: why 1ms? why not exponential backoff? polling also seems gross
+                    // TODO: why 1ms? why not exponential backoff? polling also seems gross
                     try io.sleep(std.Io.Duration.fromMilliseconds(1), .awake);
                     continue;
                 },
