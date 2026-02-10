@@ -18,7 +18,7 @@ allocator: Allocator,
 io: Io,
 init_guest_tid: linux.pid_t,
 notify_fd: linux.fd_t,
-start_time: i64,
+start_time: Io.Timestamp,
 logger: Logger,
 
 // All Thread-s starting from the initial guest Thread are assigned a virtual TID and tracked via guest_threads
@@ -32,50 +32,41 @@ mutex: Io.Mutex = .init,
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
 
-// Log buffer for stdout/stderr
-log_buffer: LogBuffer,
+// Log buffers for stdout/stderr
+// Owned by the runCmd invocation in SDK
+stdout: *LogBuffer,
+stderr: *LogBuffer,
 
-pub fn init(allocator: Allocator, io: Io, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t) !Self {
+pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout: *LogBuffer, stderr: *LogBuffer) !Self {
     const logger = Logger.init(.supervisor);
     var guest_threads = Threads.init(allocator);
     errdefer guest_threads.deinit();
     _ = try guest_threads.handleInitialThread(init_guest_tid);
 
-    const uid = generateUid();
     var overlay = try OverlayRoot.init(io, uid);
     errdefer overlay.deinit();
 
     return .{
         .allocator = allocator,
         .io = io,
-        .log_buffer = .init(allocator),
+        .stdout = stdout,
+        .stderr = stderr,
         .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
-        .start_time = std.time.timestamp(),
+        .start_time = try Io.Clock.awake.now(io),
         .logger = logger,
         .guest_threads = guest_threads,
         .overlay = overlay,
     };
 }
 
-fn generateUid() [16]u8 {
-    var uid_bytes: [8]u8 = undefined;
-    if (builtin.is_test) {
-        @memcpy(&uid_bytes, "testtest");
-    } else {
-        std.crypto.random.bytes(&uid_bytes);
-    }
-    return std.fmt.bytesToHex(uid_bytes, .lower);
-}
-
 pub fn deinit(self: *Self) void {
-    self.log_buffer.flushAll(self.io);
     if (self.notify_fd >= 0) {
         posix.close(self.notify_fd);
     }
     self.guest_threads.deinit();
     self.overlay.deinit();
-    self.log_buffer.deinit();
+    // LogBuffers are owned by caller, not freed here
 }
 
 pub fn run(self: *Self) !void {

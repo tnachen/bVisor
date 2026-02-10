@@ -157,6 +157,19 @@ pub const ProcFile = struct {
         var file = try ProcFile.open(caller, path);
         return file.statx();
     }
+
+    pub fn lseek(self: *ProcFile, offset: i64, whence: u32) !i64 {
+        const base: i64 = switch (whence) {
+            linux.SEEK.SET => 0,
+            linux.SEEK.CUR => @intCast(self.offset),
+            linux.SEEK.END => @intCast(self.content_len),
+            else => return error.InvalidArgument,
+        };
+        const new_offset = std.math.add(i64, base, offset) catch return error.InvalidArgument;
+        if (new_offset < 0) return error.InvalidArgument;
+        self.offset = @intCast(new_offset);
+        return new_offset;
+    }
 };
 
 // ============================================================================

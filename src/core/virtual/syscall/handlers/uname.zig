@@ -11,6 +11,8 @@ const memory_bridge = deps.memory_bridge;
 
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
+const LogBuffer = @import("../../../LogBuffer.zig");
+const generateUid = @import("../../../setup.zig").generateUid;
 
 /// Machine name derived from the build target's CPU architecture.
 const machine_name = switch (builtin.cpu.arch) {
@@ -23,15 +25,14 @@ const machine_name = switch (builtin.cpu.arch) {
 
 /// Convert a comptime string literal into a [64:0]u8 utsname field.
 fn utsField(comptime str: []const u8) [64:0]u8 {
-    comptime {
-        if (str.len > 64) @compileError("utsname field exceeds 64 bytes");
-        var field: [64:0]u8 = std.mem.zeroes([64:0]u8);
-        @memcpy(field[0..str.len], str);
-        return field;
-    }
+    if (str.len > 64) @compileError("utsname field exceeds 64 bytes");
+    var field: [64:0]u8 = std.mem.zeroes([64:0]u8);
+    @memcpy(field[0..str.len], str);
+    return field;
 }
 
 pub fn handle(notif: linux.SECCOMP.notif, _: *Supervisor) linux.SECCOMP.notif_resp {
+
     // Parse args: uname(struct utsname *buf)
     const buf_addr: u64 = notif.data.arg0;
 
@@ -58,7 +59,11 @@ pub fn handle(notif: linux.SECCOMP.notif, _: *Supervisor) linux.SECCOMP.notif_re
 test "uname returns virtualized system info" {
     const allocator = testing.allocator;
     const init_tid: linux.pid_t = 12345;
-    var supervisor = try Supervisor.init(allocator, testing.io, -1, init_tid);
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
     var uts: linux.utsname = undefined;

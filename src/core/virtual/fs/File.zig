@@ -154,3 +154,11 @@ pub fn statxToStat(sx: linux.Statx) Stat {
 
     return st;
 }
+pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
+    switch (self.backend) {
+        .passthrough => |*f| return f.lseek(offset, whence),
+        .cow => |*f| return f.lseek(offset, whence),
+        .tmp => |*f| return f.lseek(offset, whence),
+        .proc => |*f| return f.lseek(offset, whence),
+    }
+}
