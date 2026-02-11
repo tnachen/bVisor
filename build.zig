@@ -45,6 +45,8 @@ pub fn build(b: *std.Build) void {
     };
 
     var node_installs: [node_platforms.len]*std.Build.Step = undefined;
+    var arch_node_installs: [node_platforms.len]*std.Build.Step = undefined;
+    var arch_node_count: usize = 0;
     for (node_platforms, 0..) |platform, i| {
         const target = b.resolveTargetQuery(.{
             .cpu_arch = platform.cpu_arch,
@@ -78,6 +80,10 @@ pub fn build(b: *std.Build) void {
         });
         b.getInstallStep().dependOn(&install.step);
         node_installs[i] = &install.step;
+        if (platform.cpu_arch == arch) {
+            arch_node_installs[arch_node_count] = &install.step;
+            arch_node_count += 1;
+        }
     }
 
     // Build exe and test binaries for both architectures
@@ -148,12 +154,16 @@ pub fn build(b: *std.Build) void {
 
     // 'test-node' runs Node SDK test in a Docker container
     const node_cli_step = b.step("test-node", "Run Node SDK test.ts in Docker container against the current build");
-    const node_cmd = b.addSystemCommand(&.{
-        "docker", "run",                        "--rm",
-        "-v",     "./src/sdks/node:/app",       "-w",
-        "/app",   "oven/bun:alpine",            "sh",
-        "-c",     "bun install && bun test.ts",
-    });
-    for (&node_installs) |step| node_cmd.step.dependOn(step);
-    node_cli_step.dependOn(&node_cmd.step);
+    if (arch != builtin.cpu.arch) {
+        node_cli_step.dependOn(&b.addFail("zig build test-node requires native arch").step);
+    } else {
+        const node_cmd = b.addSystemCommand(&.{
+            "docker", "run",                        "--rm",
+            "-v",     "./src/sdks/node:/app",       "-w",
+            "/app",   "oven/bun:alpine",            "sh",
+            "-c",     "bun install && bun test.ts",
+        });
+        for (arch_node_installs[0..arch_node_count]) |step| node_cmd.step.dependOn(step);
+        node_cli_step.dependOn(&node_cmd.step);
+    }
 }
