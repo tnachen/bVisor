@@ -20,7 +20,6 @@ zig build test               # Run unit tests in Docker container
 zig build run                # Run executable in Docker container
 ```
 
-Builds for aarch64-linux-musl (exe/tests) and both aarch64/x86_64 with musl/gnu (node SDK).
 
 **Requires**: Zig 0.16.0-dev or later, Docker
 
@@ -166,3 +165,9 @@ All tests run in Docker (`zig build test`). The test binary is cross-compiled fo
 - Use std.linux specific APIs rather than calling syscalls directly. When in doubt, grep std.linux. The std lib can be found in the same directory as the Zig binary, plus `./lib/std/os/linux.zig`.
 - Batch operations when possible - avoid syscall-per-byte patterns (e.g., use `readSlice` to read known-length buffers in one call).
 - The std library is full of useful APIs. Before writing a new function, check if it already exists in std.
+
+## Comment Style
+- Only include comments if the code is not self-explanatory.
+- Comments are intended to inform future readers about the code. Do not include commentary related to the conversations had with the user, which may look something like "Do ... (this is what we agreed on)". 
+- Do NOT create section dividers like `// =============================================================================`. These are not useful and clutter the code. Do not add them.
+- Do not remove or modify comments unless they are no longer accurate.

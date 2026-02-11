@@ -32,7 +32,7 @@ pub inline fn lookupGuestFdWithRetry(child_pid: linux.pid_t, local_fd: linux.fd_
             .Error => |err| switch (err) {
                 .BADF => {
                     // FD doesn't exist yet in child - retry
-                    // TODO: why 1ms? why not exponential backoff? polling also seems gross
+                    // ERIK TODO: why 1ms? why not exponential backoff? polling also seems gross
                     try io.sleep(std.Io.Duration.fromMilliseconds(1), .awake);
                     continue;
                 },

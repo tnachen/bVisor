@@ -5,9 +5,9 @@ const posix = std.posix;
 const types = @import("../types.zig");
 const LinuxResult = types.LinuxResult;
 
-/// Read an object of type T from child_addr in child's address space.
-/// Creates a copy in the local process.
-/// Remember any nested pointers returned are still in child's address space.
+/// Read an object of type T from child_addr in child's address space
+/// This creates a copy in the local process
+/// Remember any nested pointers returned are still in child's address space
 pub inline fn read(T: type, child_pid: linux.pid_t, child_addr: u64) !T {
     if (comptime builtin.is_test) {
         const ptr: *const T = @ptrFromInt(child_addr);
@@ -30,7 +30,7 @@ pub inline fn read(T: type, child_pid: linux.pid_t, child_addr: u64) !T {
     return local_T;
 }
 
-/// Read bytes from child's address space into a local buffer.
+/// Read bytes from child's address space into a local buffer
 pub inline fn readSlice(dest: []u8, child_pid: linux.pid_t, child_addr: u64) !void {
     if (comptime builtin.is_test) {
         const src: [*]const u8 = @ptrFromInt(child_addr);
@@ -52,15 +52,17 @@ pub inline fn readSlice(dest: []u8, child_pid: linux.pid_t, child_addr: u64) !vo
     ).unwrap();
 }
 
-/// Read a null-terminated string from addr into buf.
-/// Returns the slice up to (but not including) the null terminator.
+/// Read a null-terminated string from addr into buf
+/// Returns the slice up to (but not including) the null terminator
+/// Returns error if no null terminator is found
 pub inline fn readString(buf: []u8, child_pid: linux.pid_t, child_addr: u64) ![]const u8 {
     try readSlice(buf, child_pid, child_addr);
     const len = std.mem.indexOfScalar(u8, buf, 0) orelse return error.InsufficientBufferLength;
     return buf[0..len];
 }
 
-/// Write an object of type T into child's address space at child_addr.
+/// Write an object of type T into child's address space at child_addr
+/// Misuse could seriously corrupt child process
 pub inline fn write(T: type, child_pid: linux.pid_t, val: T, child_addr: u64) !void {
     if (comptime builtin.is_test) {
         const ptr: *T = @ptrFromInt(child_addr);
@@ -82,7 +84,7 @@ pub inline fn write(T: type, child_pid: linux.pid_t, val: T, child_addr: u64) !v
     ).unwrap();
 }
 
-/// Write bytes from local buffer into child's address space.
+/// Write bytes from local buffer into child's address space
 pub inline fn writeSlice(src: []const u8, child_pid: linux.pid_t, child_addr: u64) !void {
     if (comptime builtin.is_test) {
         const dest: [*]u8 = @ptrFromInt(child_addr);
@@ -104,7 +106,7 @@ pub inline fn writeSlice(src: []const u8, child_pid: linux.pid_t, child_addr: u6
     ).unwrap();
 }
 
-/// Write a null-terminated string from src to addr.
+/// Write a null-terminated string from src to addr
 pub inline fn writeString(src: []const u8, child_pid: linux.pid_t, child_addr: u64) !void {
     try writeSlice(src, child_pid, child_addr);
     try write(u8, child_pid, 0, child_addr + src.len);

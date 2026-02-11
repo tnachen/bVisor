@@ -7,8 +7,10 @@ const types = @import("../types.zig");
 const LinuxResult = types.LinuxResult;
 
 const Thread = @import("../virtual/proc/Thread.zig");
+// Thread IDs
 pub const AbsTid = Thread.AbsTid;
 pub const NsTid = Thread.NsTid;
+// ThreadGroup IDs
 pub const AbsTgid = Thread.AbsTgid;
 pub const NsTgid = Thread.NsTgid;
 
@@ -19,10 +21,6 @@ const MAX_NS_DEPTH = ThreadStatus.MAX_NS_DEPTH;
 
 // kcmp types from linux/kcmp.h
 const KCMP_FILES: u5 = 2;
-
-// =============================================================================
-// Test mock state (only compiled in test builds)
-// =============================================================================
 
 pub const mock = if (builtin.is_test) struct {
     pub var ptid_map: std.AutoHashMapUnmanaged(AbsTid, AbsTid) = .empty;
@@ -65,27 +63,29 @@ pub const mock = if (builtin.is_test) struct {
     }
 } else struct {};
 
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Detect clone flags by querying kernel state.
+/// Detect clone flags by querying kernel state
 pub fn detectCloneFlags(parent_tid: AbsTid, child_tid: AbsTid) CloneFlags {
     if (comptime builtin.is_test)
         return mock.clone_flags.get(child_tid) orelse CloneFlags{};
 
     var flags: u64 = 0;
+
+    // Check CLONE_NEWPID via Namespace inode comparison
     if (!sameTidNamespace(parent_tid, child_tid)) {
         flags |= linux.CLONE.NEWPID;
     }
+
+    // Check CLONE_FILES via kcmp syscall
     if (sharesFdTable(parent_tid, child_tid)) {
         flags |= linux.CLONE.FILES;
     }
+
     return CloneFlags.from(flags);
 }
 
-/// Read NSpid chain from /proc/[tgid]/task/[tid]/status.
-/// Returns NsTids ordered outermost to innermost namespace.
+/// Reads NSpid field and returns NsTid-s
+/// from /proc/[tgid]/task/[tid]/status.
+/// Follows outermost to innermost namespace.
 pub fn readNsTids(tgid: AbsTgid, tid: AbsTid, nstid_buf: []NsTid) ![]NsTid {
     if (comptime builtin.is_test) {
         if (mock.nstids.get(tid)) |ns_tids| {
@@ -113,6 +113,7 @@ pub fn readNsTids(tgid: AbsTgid, tid: AbsTid, nstid_buf: []NsTid) ![]NsTid {
     ).unwrap();
 
     var nstids: []NsTid = &.{};
+
     var lines = std.mem.splitScalar(u8, file_buf[0..n], '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "NSpid:")) {
@@ -120,11 +121,16 @@ pub fn readNsTids(tgid: AbsTgid, tid: AbsTid, nstid_buf: []NsTid) ![]NsTid {
             break;
         }
     }
+
+    // Validate the field was found
     if (nstids.len == 0) return error.NSpidNotFound;
+
     return nstids;
 }
 
-/// Get the status of a thread by reading /proc/{tid}/status.
+/// Get the status of a given Thread using only its TID.
+/// Reads from /proc/{tid}/status (kernel maintains this for all tasks).
+/// The TGID is parsed from the file's Tgid: field.
 pub fn getStatus(tid: AbsTid) !ThreadStatus {
     if (comptime builtin.is_test) {
         const ptid = mock.ptid_map.get(tid) orelse return error.ThreadNotInKernel;
@@ -183,24 +189,33 @@ pub fn getStatus(tid: AbsTid) !ThreadStatus {
 
     var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
     while (lines.next()) |line| {
+        // Parse "Tgid:\t<tgid>" line
         if (std.mem.startsWith(u8, line, "Tgid:")) {
             const tgid_str = std.mem.trim(u8, line[5..], " \t");
             tgid_found = std.fmt.parseInt(AbsTgid, tgid_str, 10) catch return error.ParseError;
-        } else if (std.mem.startsWith(u8, line, "PPid:")) {
+        }
+        // Parse "PPid:\t<pid>" line
+        else if (std.mem.startsWith(u8, line, "PPid:")) {
             const ptid_str = std.mem.trim(u8, line[5..], " \t");
             ptid_found = std.fmt.parseInt(AbsTid, ptid_str, 10) catch return error.ParseError;
-        } else if (std.mem.startsWith(u8, line, "NStgid:")) {
+        }
+        // Parse "NStgid:\t<tgid>[\t<tgid>...]" line
+        else if (std.mem.startsWith(u8, line, "NStgid:")) {
             const tgids_str = std.mem.trim(u8, line[7..], " \t");
             var iter = std.mem.tokenizeAny(u8, tgids_str, " \t");
+
             while (iter.next()) |tgid_str| {
                 if (status.nstgids_len >= MAX_NS_DEPTH) return error.BufferTooSmall;
                 status.nstgids_buf[status.nstgids_len] = std.fmt.parseInt(NsTgid, tgid_str, 10) catch return error.ParseError;
                 status.nstgids_len += 1;
             }
             nstgid_found = true;
-        } else if (std.mem.startsWith(u8, line, "NSpid:")) {
+        }
+        // Parse "NSpid:\t<tid>[\t<tid>...]" line
+        else if (std.mem.startsWith(u8, line, "NSpid:")) {
             const tids_str = std.mem.trim(u8, line[6..], " \t");
             var iter = std.mem.tokenizeAny(u8, tids_str, " \t");
+
             while (iter.next()) |tid_str| {
                 if (status.nstids_len >= MAX_NS_DEPTH) return error.BufferTooSmall;
                 status.nstids_buf[status.nstids_len] = std.fmt.parseInt(NsTid, tid_str, 10) catch return error.ParseError;
@@ -208,6 +223,8 @@ pub fn getStatus(tid: AbsTid) !ThreadStatus {
             }
             nstid_found = true;
         }
+
+        // Early exit once found all fields
         if (tgid_found != null and ptid_found != null and nstgid_found and nstid_found) break;
     }
 
@@ -219,7 +236,7 @@ pub fn getStatus(tid: AbsTid) !ThreadStatus {
     return status;
 }
 
-/// List all TGIDs from /proc directory.
+/// List all Tgids from /proc directory
 pub fn listTgids(allocator: Allocator) ![]AbsTgid {
     var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
@@ -241,7 +258,7 @@ pub fn listTgids(allocator: Allocator) ![]AbsTgid {
     return tgids.toOwnedSlice(allocator);
 }
 
-/// List all TIDs from /proc/*/task/* directories.
+/// List all Tids within directories of the form /proc/[tgid]/task/[tid]
 pub fn listTids(allocator: Allocator) ![]AbsTid {
     if (comptime builtin.is_test) {
         var tids: std.ArrayListUnmanaged(AbsTid) = .empty;
@@ -263,11 +280,13 @@ pub fn listTids(allocator: Allocator) ![]AbsTid {
     var tids: std.ArrayListUnmanaged(AbsTid) = .empty;
     errdefer tids.deinit(allocator);
 
+    // Iterate through all /proc/[tgid] (process directories)
     var proc_iter = proc_dir.iterate();
     while (try proc_iter.next(io)) |proc_entry| {
         if (proc_entry.kind != .directory) continue;
         const tgid = std.fmt.parseInt(AbsTgid, proc_entry.name, 10) catch continue;
 
+        // Now open /proc/[tgid]/task to find all threads
         var task_path_buf: [64]u8 = undefined;
         const task_path = std.fmt.bufPrint(&task_path_buf, "/proc/{d}/task", .{tgid}) catch continue;
 
@@ -277,18 +296,15 @@ pub fn listTids(allocator: Allocator) ![]AbsTid {
         var task_iter = task_dir.iterate();
         while (try task_iter.next(io)) |task_entry| {
             if (task_entry.kind != .directory) continue;
-            const abs_tid = std.fmt.parseInt(AbsTid, task_entry.name, 10) catch continue;
-            try tids.append(allocator, abs_tid);
+            const tid = std.fmt.parseInt(AbsTid, task_entry.name, 10) catch continue;
+            try tids.append(allocator, tid);
         }
     }
 
     return tids.toOwnedSlice(allocator);
 }
 
-// =============================================================================
-// Internal helpers (Linux-only, not compiled in test builds)
-// =============================================================================
-
+/// Parser for namespace ID fields
 fn parseNsField(comptime IdType: type, field_data: []const u8, buf: []IdType) ![]IdType {
     const ids_str = std.mem.trim(u8, field_data, " \t");
     var count: usize = 0;
@@ -302,12 +318,17 @@ fn parseNsField(comptime IdType: type, field_data: []const u8, buf: []IdType) ![
     return buf[0..count];
 }
 
+/// Check whether two threads share the same PID namespace (according to the kernel).
+/// Uses /proc/{tid}/ns/pid which the kernel maintains for all tasks.
 fn sameTidNamespace(tid1: AbsTid, tid2: AbsTid) bool {
     const ino1 = getNsInode(tid1, "pid") orelse return true;
     const ino2 = getNsInode(tid2, "pid") orelse return true;
     return ino1 == ino2;
 }
 
+/// Get namespace inode for a Thread by reading /proc/{tid}/ns/{ns_type}.
+/// The kernel maintains /proc/{tid} entries for all tasks (threads), so we can
+/// access namespace info directly without needing the TGID.
 fn getNsInode(tid: AbsTid, ns_type: []const u8) ?u64 {
     var path_buf: [64:0]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/ns/{s}", .{ tid, ns_type }) catch return null;
@@ -324,7 +345,11 @@ fn getNsInode(tid: AbsTid, ns_type: []const u8) ?u64 {
     return stat_buf.ino;
 }
 
+/// Check whether two Threads share the same FD table (according to the kernel) using kcmp.
+/// The kcmp syscall takes PIDs which in kernel terminology are TIDs.
 fn sharesFdTable(tid1: AbsTid, tid2: AbsTid) bool {
+    // kcmp returns: 0 = equal, positive = different, negative = error
+    // Only 0 means they share the same FD table
     const result = linux.syscall5(
         .kcmp,
         @intCast(tid1),
