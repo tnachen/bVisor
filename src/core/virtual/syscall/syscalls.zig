@@ -52,8 +52,8 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .getcwd => getcwd.handle(notif, supervisor),
         .chdir => chdir.handle(notif, supervisor),
         .fchdir => fchdir.handle(notif, supervisor),
-        .pipe2 => pipe2.handle(notif, supervisor),
         .faccessat => faccessat.handle(notif, supervisor),
+        .pipe2 => pipe2.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),

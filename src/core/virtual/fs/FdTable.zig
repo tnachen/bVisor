@@ -225,6 +225,13 @@ pub fn remove(self: *Self, vfd: VirtualFD) bool {
     return self.open_files.remove(vfd);
 }
 
+/// Get the CLOEXEC field of an FdEntry in the table
+/// Assumes the caller has already verified the vfd exists in the table
+pub fn getCloexec(self: *Self, vfd: VirtualFD) bool {
+    const entry = self.open_files.get(vfd) orelse return false;
+    return entry.cloexec;
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

@@ -16,8 +16,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Parse args: pipe2(pipefd[2], flags)
     const caller_tid: AbsTid = @intCast(notif.pid);
     const pipefd_ptr: u64 = notif.data.arg0;
-    const flags: u32 = @truncate(notif.data.arg1);
-    const cloexec = (flags & linux.O.CLOEXEC.toInt()) != 0;
+    const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg1)));
+    const cloexec = flags.CLOEXEC;
 
     // Create the kernel pipe
     var kernel_fds: [2]i32 = undefined;
@@ -37,16 +37,17 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     };
 
     const write_file = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fds[1] } }) catch {
-        read_file.unref(); // closes kernel_fds[0] via Passthrough.close
+        read_file.unref(); // already closes kernel_fds[0] via Passthrough.close
         _ = std.posix.system.close(kernel_fds[1]);
         logger.log("pipe2: failed to alloc write File", .{});
         return replyErr(notif.id, .NOMEM);
     };
 
-    // Register both in the caller's fd table
+    // Register both in the caller's FdTable
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
 
+    // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         read_file.unref();
         write_file.unref();
@@ -148,7 +149,7 @@ test "pipe2 with O_CLOEXEC sets cloexec flag" {
     const notif = makeNotif(.pipe2, .{
         .pid = init_tid,
         .arg0 = @intFromPtr(&pipefd),
-        .arg1 = linux.O.CLOEXEC.toInt(),
+        .arg1 = @as(u32, @bitCast(@as(linux.O, .{ .CLOEXEC = true }))),
     });
 
     const resp = handle(notif, &supervisor);
