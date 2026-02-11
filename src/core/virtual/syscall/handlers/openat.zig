@@ -9,6 +9,7 @@ const Cow = @import("../../fs/backend/cow.zig").Cow;
 const Tmp = @import("../../fs/backend/tmp.zig").Tmp;
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
 const path_router = @import("../../path.zig");
+const resolveAndRoute = path_router.resolveAndRoute;
 const Supervisor = @import("../../../Supervisor.zig");
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
@@ -34,18 +35,54 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         return replyErr(notif.id, .FAULT);
     };
 
-    // Only absolute paths supported for now
     const dirfd: i32 = @truncate(@as(i64, @bitCast(notif.data.arg0)));
-    _ = dirfd; // dirfd only matters for relative paths
-    if (path.len == 0 or path[0] != '/') {
-        logger.log("openat: path must be absolute: {s}", .{path});
+
+    if (path.len == 0) {
         return replyErr(notif.id, .INVAL);
     }
 
-    // Route the path to determine which backend handles it
-    const route_result = path_router.route(path) catch {
-        logger.log("openat: path normalization failed for: {s}", .{path});
-        return replyErr(notif.id, .INVAL);
+    // Determine base directory for path resolution (copy to stack, release lock)
+    // - Absolute paths: base is irrelevant (resolveAndRoute ignores it)
+    // - Relative + AT_FDCWD: resolve against caller's cwd
+    // - Relative + real dirfd: resolve against dirfd's opened path
+    var base_buf: [512]u8 = undefined;
+    const base: []const u8 = blk: {
+        supervisor.mutex.lockUncancelable(supervisor.io);
+        defer supervisor.mutex.unlock(supervisor.io);
+
+        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
+            logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
+            return replyErr(notif.id, .SRCH);
+        };
+
+        // Relative path with a real dirfd: use dirfd's opened path as base
+        if (path[0] != '/' and dirfd != -100) {
+            const dir_file = caller.fd_table.get_ref(dirfd) orelse {
+                logger.log("openat: EBADF for dirfd={d}", .{dirfd});
+                return replyErr(notif.id, .BADF);
+            };
+            defer dir_file.unref();
+
+            const dir_path = dir_file.opened_path orelse {
+                logger.log("openat: dirfd={d} has no associated path", .{dirfd});
+                return replyErr(notif.id, .NOTDIR);
+            };
+            if (dir_path.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+            @memcpy(base_buf[0..dir_path.len], dir_path);
+            break :blk base_buf[0..dir_path.len];
+        }
+
+        // Otherwise use cwd
+        const c = caller.fs_info.cwd;
+        if (c.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+        @memcpy(base_buf[0..c.len], c);
+        break :blk base_buf[0..c.len];
+    };
+
+    // Resolve path against base and route through access rules
+    var resolve_buf: [512]u8 = undefined;
+    const route_result = resolveAndRoute(base, path, &resolve_buf) catch {
+        return replyErr(notif.id, .NAMETOOLONG);
     };
 
     switch (route_result) {
@@ -53,7 +90,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             logger.log("openat: blocked path: {s}", .{path});
             return replyErr(notif.id, .PERM);
         },
-        .handle => |backend| {
+        .handle => |h| {
             // Convert linux.O to posix.O
             const linux_flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
             const flags = linuxToPosixFlags(linux_flags);
@@ -61,7 +98,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
             // Special case: if we're in the /proc filepath
             // We need to sync guest_threads with the kernel to ensure all current PIDs are registered
-            if (backend == .proc) {
+            if (h.backend == .proc) {
                 supervisor.mutex.lockUncancelable(supervisor.io);
                 defer supervisor.mutex.unlock(supervisor.io);
 
@@ -73,26 +110,26 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
             // Open the file via the appropriate backend
             // Note all are lock-free (independent of internal supervisor state) except for proc
-            const file: *File = switch (backend) {
-                .passthrough => File.init(allocator, .{ .passthrough = Passthrough.open(&supervisor.overlay, path, flags, mode) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+            const file: *File = switch (h.backend) {
+                .passthrough => File.init(allocator, .{ .passthrough = Passthrough.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 } }) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 },
-                .cow => File.init(allocator, .{ .cow = Cow.open(&supervisor.overlay, path, flags, mode) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                .cow => File.init(allocator, .{ .cow = Cow.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 } }) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 },
-                .tmp => File.init(allocator, .{ .tmp = Tmp.open(&supervisor.overlay, path, flags, mode) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                .tmp => File.init(allocator, .{ .tmp = Tmp.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 } }) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 },
                 .proc => File.init(allocator, .{
@@ -106,15 +143,21 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
                             logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
                             return replyErr(notif.id, .SRCH);
                         };
-                        break :blk ProcFile.open(caller, path) catch |err| {
-                            logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                        break :blk ProcFile.open(caller, h.normalized) catch |err| {
+                            logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                             return replyErr(notif.id, if (err == error.FileNotFound) .NOENT else .IO);
                         };
                     },
                 }) catch |err| {
-                    logger.log("openat: failed to open {s}: {s}", .{ path, @errorName(err) });
+                    logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
                     return replyErr(notif.id, .IO);
                 },
+            };
+
+            // Store the opened path on the File (already normalized by resolveAndRoute)
+            file.setOpenedPath(h.normalized) catch {
+                file.unref();
+                return replyErr(notif.id, .NOMEM);
             };
 
             // Enter critical section for all backends
@@ -138,7 +181,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
                 file.unref();
                 return replyErr(notif.id, .MFILE);
             };
-            logger.log("openat: opened {s} as vfd={d}", .{ path, vfd });
+            logger.log("openat: opened {s} as vfd={d}", .{ h.normalized, vfd });
             return replySuccess(notif.id, @intCast(vfd));
         },
     }
@@ -228,7 +271,7 @@ test "openat /tmp/.bvisor/secret returns EPERM" {
     try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.PERM))), resp.@"error");
 }
 
-test "openat relative path returns EINVAL" {
+test "openat relative path resolves against cwd" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
     var stdout_buf = LogBuffer.init(allocator);
@@ -238,10 +281,11 @@ test "openat relative path returns EINVAL" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    const notif = makeOpenatNotif(init_tid, "relative/path", 0, 0);
+    // cwd is "/" so "proc/self" resolves to "/proc/self" (same as the absolute path test)
+    const notif = makeOpenatNotif(init_tid, "proc/self", 0, 0);
     const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.INVAL))), resp.@"error");
+    try testing.expect(!isError(resp));
+    try testing.expect(resp.val >= 3);
 }
 
 test "openat empty path returns EINVAL" {
