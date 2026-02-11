@@ -55,7 +55,7 @@ Syscalls are intercepted and handled in userspace by the bVisor virtual kernel.
 | | Syscalls |
 |-|----------|
 | File I/O | `openat`, `close`, `read`, `write`, `readv`, `writev`, `lseek`, `dup`, `dup3` |
-| File metadata | `fstat`, `fstatat64`, `faccessat2` |
+| File metadata | `fstat`, `fstatat64`, `faccessat` |
 | Directory | `getcwd`, `chdir`, `fchdir` |
 | Process | `getpid`, `getppid`, `gettid`, `kill`, `tkill`, `exit`, `exit_group` |
 | System info | `uname`, `sysinfo` |
