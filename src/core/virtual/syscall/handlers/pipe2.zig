@@ -9,8 +9,6 @@ const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-// TODO: passthrough backend is only intended for certain fixed-path directories
-//       pipe shouldn't be passthrough
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
