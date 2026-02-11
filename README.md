@@ -138,18 +138,10 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 bVisor is written in Zig. Zig is pre-1.0, so compilation is only guaranteed with the exact zig build. We're using a tagged commit on 0.16 dev, which includes major breaking changes (Io) compared to previous versions, so please use the exact version specified in the `build.zig.zon` file. It's also recommended to compile ZLS from source using a tagged commit compatible with Zig. You'll be flying blind otherwise.
 
 #### Cross-compilation
-bVisor depends on Linux kernel features, although it's developed primarily on ARM Macs.
-
-Therefore, a compile-time dependency-injection pattern is used to swap in the appropriate implementation for the build target, allowing for tests to run on our development machines.
-
-Linux tests are supported via Docker.
+bVisor depends on Linux kernel features, although it's developed primarily on ARM Macs. Zig cross-compiles to Linux, and all tests run in Docker.
 
 ```bash
-# Native
-zig build        # Cross-compile for all targets (exec, testing, N-API distribution)
-zig build test   # Unit tests on host (Mac-compatible via comptime DI)
-
-# Testing using Docker
-zig build test -Duse-docker  # Unit tests in Docker (exercises real Linux deps)
-zig build run                # E2E smoke test in Docker (scorecard of supported syscalls)
+zig build        # Cross-compile for all targets (exe, tests, N-API .node binaries)
+zig build test   # Unit tests in Docker container
+zig build run    # E2E smoke test in Docker (scorecard of supported syscalls)
 ```

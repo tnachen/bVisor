@@ -15,15 +15,13 @@ The goal of bVisor is to be a lightweight sandbox for untrusted user or LLM-gene
 ## Build Commands
 
 ```bash
-zig build                    # Build for aarch64-linux-musl
-zig build test               # Run unit tests on host
-zig build test -Duse-docker  # Run unit tests in Docker container
+zig build                    # Build all targets (exe, tests, node .node binaries)
+zig build test               # Run unit tests in Docker container
 zig build run                # Run executable in Docker container
 ```
 
-The build targets aarch64 Linux with musl ABI (for ARM64/Apple Silicon Docker). Modify `build.zig` lines 9-11 for other targets.
 
-**Requires**: Zig 0.16.0-dev or later
+**Requires**: Zig 0.16.0-dev or later, Docker
 
 
 ## Architecture
@@ -45,20 +43,10 @@ src/
       filter.zig        # BPF filter installation, returns notify FD
       notif.zig         # Helper to construct test notifications
 
-    deps/               # Comptime dependency injection for testability
-      deps.zig          # Re-exports pidfd, memory_bridge, proc_info
-      memory_bridge/
-        memory_bridge.zig # Comptime selector for implementation
-        impl/linux.zig    # Production: process_vm_readv/writev
-        impl/testing.zig  # Testing: local pointer access
-      pidfd/
-        pidfd.zig         # Comptime selector for implementation
-        impl/linux.zig    # Production: pidfd_open/pidfd_getfd
-        impl/testing.zig  # Testing: mock implementation
-      proc_info/
-        proc_info.zig     # Comptime selector for implementation
-        impl/linux.zig    # Production: TID/TGID info, clone flags detection via /proc
-        impl/testing.zig  # Testing: mock maps (mock_ptid_map, mock_clone_flags, mock_nstids, mock_nstgids)
+    utils/              # Linux utility modules
+      memory_bridge.zig # process_vm_readv/writev (test mode: local pointer access)
+      pidfd.zig         # pidfd_open/pidfd_getfd (test mode: passthrough)
+      proc_info.zig     # TID/TGID info, clone flags via /proc (test mode: mock maps)
 
     virtual/            # Virtualization layer
       OverlayRoot.zig   # Root overlay filesystem management
@@ -143,17 +131,13 @@ When implementing a new emulated syscall,
 
 ## Testing
 
-**Comptime dependency injection**: `src/deps/` modules use `builtin.is_test` to select implementation:
-```zig
-const impl = if (builtin.is_test)
-    @import("impl/testing.zig")
-else
-    @import("impl/linux.zig");
-```
+All tests run in Docker (`zig build test`). The test binary is cross-compiled for aarch64-linux and executed in an Alpine container.
 
-**Test discovery**: Remember Zig only runs tests from files imported by the test root. All test files must be reachable from `src/core/main.zig` via `_ = @import(...)` in its `test` block. When adding a new file with tests, add an import there or the tests won't run.
+**Test-mode behavior**: `src/core/utils/` modules use `builtin.is_test` to provide lightweight test alternatives (e.g., `memory_bridge` treats addresses as local pointers, `proc_info` uses mock maps instead of `/proc`). This allows unit tests to construct fake notifications without a real child process.
 
-**E2E tests**: Use `makeNotif()` from `src/seccomp/notif.zig` to construct test notifications. `TestingMemoryBridge` treats addresses as local pointers, enabling full syscall handler testing without a real child process.
+**Test discovery**: Zig only runs tests from files imported by the test root. All test files must be reachable from `src/core/main.zig` via `_ = @import(...)` in its `test` block. When adding a new file with tests, add an import there or the tests won't run.
+
+**E2E tests**: Use `makeNotif()` from `src/seccomp/notif.zig` to construct test notifications.
 
 **Logger**: Disabled during tests (`builtin.is_test`) to avoid interfering with `zig build test` IPC.
 
@@ -174,7 +158,6 @@ else
 - Where possible, keep structs as individual files, using the file-as-struct pattern with `const Self = @This()`.
 - Prefer the `try` keyword over `catch` when possible.
 - Prefer enums with switches for dynamic dispatch. Inline else to enforce that all enum variants contain methods of a certain signature (see syscall.zig for ref).
-- Use dependency injection where possible to help keep testing free of IO and side effects.
 - Prefer to use stack buffers over heap allocation when possible.
 - PascalCase for types (and functions returning types), snake_case for variables, camelCase for functions.
 - Use init(...) as constructor, and a deferrable deinit(...) if destructor is needed.
@@ -182,3 +165,9 @@ else
 - Use std.linux specific APIs rather than calling syscalls directly. When in doubt, grep std.linux. The std lib can be found in the same directory as the Zig binary, plus `./lib/std/os/linux.zig`.
 - Batch operations when possible - avoid syscall-per-byte patterns (e.g., use `readSlice` to read known-length buffers in one call).
 - The std library is full of useful APIs. Before writing a new function, check if it already exists in std.
+
+## Comment Style
+- Only include comments if the code is not self-explanatory.
+- Comments are intended to inform future readers about the code. Do not include commentary related to the conversations had with the user, which may look something like "Do ... (this is what we agreed on)". 
+- Do NOT create section dividers like `// =============================================================================`. These are not useful and clutter the code. Do not add them.
+- Do not remove or modify comments unless they are no longer accurate.
