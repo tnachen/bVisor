@@ -9,6 +9,8 @@ const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
+// TODO: passthrough backend is only intended for certain fixed-path directories
+//       pipe shouldn't be passthrough
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
@@ -119,7 +121,7 @@ test "pipe2 creates two virtual fds and writes them back" {
     try testing.expect(pipefd[1] >= 3);
     try testing.expect(pipefd[0] != pipefd[1]);
 
-    // Both should exist in the fd table
+    // Both should exist in the FdTable
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const read_ref = caller.fd_table.get_ref(pipefd[0]);
     defer if (read_ref) |f| f.unref();
