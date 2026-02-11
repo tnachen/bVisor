@@ -87,8 +87,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // Build exe and test binaries for both architectures
-    var exe_install_step: *std.Build.Step = undefined;
-    var test_install_step: *std.Build.Step = undefined;
+    var exe_install_step: ?*std.Build.Step = null;
+    var test_install_step: ?*std.Build.Step = null;
     for (targets) |t| {
         const linux_target = b.resolveTargetQuery(.{
             .cpu_arch = t.cpu_arch,
@@ -123,6 +123,8 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&test_install.step);
         if (t.cpu_arch == arch) test_install_step = &test_install.step;
     }
+    std.debug.assert(exe_install_step != null);
+    std.debug.assert(test_install_step != null);
 
     // 'run' executes the sandbox in a Linux container
     // Seccomp does not work cross-architecture due to the emulation layer
@@ -133,7 +135,7 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addSystemCommand(&.{ "docker", "run", "--rm" });
         run_cmd.addArgs(&.{ "-v", "./zig-out:/zig-out", "alpine" });
         run_cmd.addArg(b.fmt("/zig-out/bin/bVisor{s}", .{bin_suffix}));
-        run_cmd.step.dependOn(exe_install_step);
+        run_cmd.step.dependOn(exe_install_step.?);
         run_cli_step.dependOn(&run_cmd.step);
     }
 
@@ -149,7 +151,7 @@ pub fn build(b: *std.Build) void {
     }
     docker_test_cmd.addArgs(&.{ "-v", "./zig-out:/zig-out", "alpine" });
     docker_test_cmd.addArg(b.fmt("/zig-out/bin/tests{s}", .{bin_suffix}));
-    docker_test_cmd.step.dependOn(test_install_step);
+    docker_test_cmd.step.dependOn(test_install_step.?);
     test_cli_step.dependOn(&docker_test_cmd.step);
 
     // 'test-node' runs Node SDK test in a Docker container
