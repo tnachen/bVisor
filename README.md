@@ -55,7 +55,8 @@ Syscalls are intercepted and handled in userspace by the bVisor virtual kernel.
 | | Syscalls |
 |-|----------|
 | File I/O | `openat`, `close`, `read`, `write`, `readv`, `writev`, `lseek`, `dup`, `dup3` |
-| File metadata | `fstat`, `fstatat64` |
+| File metadata | `fstat`, `fstatat64`, `faccessat` |
+| Directory | `getcwd`, `chdir`, `fchdir` |
 | Process | `getpid`, `getppid`, `gettid`, `kill`, `tkill`, `exit`, `exit_group` |
 | System info | `uname`, `sysinfo` |
 
@@ -92,7 +93,7 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 |-|----------|
 | File I/O | `fcntl`, `ioctl`, `pipe2` |
 | File metadata | `faccessat` |
-| Directory | `getcwd`, `chdir`, `fchdir`, `getdents64`, `mkdirat`, `unlinkat` |
+| Directory | `getdents64`, `mkdirat`, `unlinkat` |
 | Process | `execve`, `set_tid_address` |
 | System info | `getrlimit`, `getrusage` |
 | Networking | not started |
@@ -104,7 +105,7 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 | | Syscalls |
 |-|----------|
 | File I/O | `pread64`, `pwrite64`, `preadv`, `pwritev`, `preadv2`, `pwritev2`, `sendfile`, `splice`, `tee`, `vmsplice`, `readahead`, `copy_file_range` |
-| File metadata | `statx`, `statfs`, `fstatfs`, `readlinkat`, `utimensat`, `truncate`, `ftruncate`, `fallocate`, `fadvise64`, `flock`, `fchmod`, `fchmodat`, `fchmodat2`, `fchown`, `fchownat`, `faccessat2`, `cachestat` |
+| File metadata | `statx`, `statfs`, `fstatfs`, `readlinkat`, `utimensat`, `truncate`, `ftruncate`, `fallocate`, `fadvise64`, `flock`, `fchmod`, `fchmodat`, `fchmodat2`, `fchown`, `fchownat`, `cachestat` |
 | Directory | `mknodat`, `symlinkat`, `linkat`, `renameat`, `renameat2` |
 | Process | `execveat`, `clone3`, `tgkill`, `prctl`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `kcmp`, `userfaultfd` |
 | System info | `syslog`, `umask`, `getcpu`, `acct`, `vhangup`, `sethostname`, `setdomainname` |

@@ -132,7 +132,7 @@ pub fn build(b: *std.Build) void {
     if (arch != builtin.cpu.arch) {
         run_cli_step.dependOn(&b.addFail("zig build run requires native arch (seccomp does not work under emulation)").step);
     } else {
-        const run_cmd = b.addSystemCommand(&.{ "docker", "run", "--rm" });
+        const run_cmd = b.addSystemCommand(&.{ "docker", "run", "--rm", "--security-opt", "seccomp=unconfined" });
         run_cmd.addArgs(&.{ "-v", "./zig-out:/zig-out", "alpine" });
         run_cmd.addArg(b.fmt("/zig-out/bin/bVisor{s}", .{bin_suffix}));
         run_cmd.step.dependOn(exe_install_step.?);
@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) void {
 
     // 'test' runs unit tests in a Linux container
     const test_cli_step = b.step("test", "Run unit tests in Docker container");
-    const docker_test_cmd = b.addSystemCommand(&.{ "docker", "run", "--rm" });
+    const docker_test_cmd = b.addSystemCommand(&.{ "docker", "run", "--rm", "--security-opt", "seccomp=unconfined" });
     if (arch != builtin.cpu.arch) {
         if (arch == .x86_64) {
             docker_test_cmd.addArgs(&.{ "--platform", "linux/amd64" });
@@ -160,10 +160,9 @@ pub fn build(b: *std.Build) void {
         node_cli_step.dependOn(&b.addFail("zig build test-node requires native arch").step);
     } else {
         const node_cmd = b.addSystemCommand(&.{
-            "docker", "run",                        "--rm",
-            "-v",     "./src/sdks/node:/app",       "-w",
-            "/app",   "oven/bun:alpine",            "sh",
-            "-c",     "bun install && bun test.ts",
+            "docker", "run",                  "--rm",                       "--security-opt", "seccomp=unconfined",
+            "-v",     "./src/sdks/node:/app", "-w",                         "/app",           "oven/bun:alpine",
+            "sh",     "-c",                   "bun install && bun test.ts",
         });
         for (arch_node_installs[0..arch_node_count]) |step| node_cmd.step.dependOn(step);
         node_cli_step.dependOn(&node_cmd.step);

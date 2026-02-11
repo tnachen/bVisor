@@ -81,6 +81,9 @@ src/
           kill.zig, tkill.zig                         # Signal handlers
           uname.zig     # System info (virtualizes hostname/domainname)
           sysinfo.zig   # System stats (virtualizes uptime/procs)
+          lseek.zig     # repositioning file offsets
+          faccessat.zig # checking user permissions to directory
+          pipe2.zig     # pipe creation
 
   sdks/
     node/               # Node.js SDK (see src/sdks/node/CLAUDE.md)
