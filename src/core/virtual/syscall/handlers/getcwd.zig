@@ -6,9 +6,7 @@ const AbsTid = Thread.AbsTid;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
-// comptime dependency injection
-const deps = @import("../../../deps/deps.zig");
-const memory_bridge = deps.memory_bridge;
+const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 /// Writes the current working directory (null-terminated) into the caller's buffer.
 /// Returns the length of the path including the null terminator on success

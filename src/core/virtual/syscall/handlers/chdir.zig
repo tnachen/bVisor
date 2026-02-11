@@ -11,9 +11,7 @@ const resolveAndRoute = path_router.resolveAndRoute;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
-// comptime dependency injection
-const deps = @import("../../../deps/deps.zig");
-const memory_bridge = deps.memory_bridge;
+const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 /// Changes the current working directory of the calling Thread.
 /// Validates the target path exists and is a directory before updating.
