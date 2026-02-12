@@ -27,7 +27,7 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
     const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
 
-    var threaded: std.Io.Threaded = .init(napi.allocator, .{});
+    var threaded: std.Io.Threaded = .init(napi.allocator, .{ .environ = .empty });
     defer threaded.deinit();
     const io = threaded.io();
 

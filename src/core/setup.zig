@@ -16,10 +16,14 @@ pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, runnable: *const fn ()
     // Probe the next available FD: dup gives the lowest free FD, then close it.
     // After fork, seccomp.install() in the child will allocate the same FD number.
     // This will race with other noise in the env, and is a temp solution
-    const expected_notify_fd = try posix.dup(0);
+    const dup_rc = linux.dup(0);
+    if (linux.errno(dup_rc) != .SUCCESS) return error.SyscallFailed;
+    const expected_notify_fd: linux.fd_t = @intCast(dup_rc);
     posix.close(expected_notify_fd);
 
-    const fork_result = try posix.fork();
+    const fork_rc = linux.fork();
+    if (linux.errno(fork_rc) != .SUCCESS) return error.SyscallFailed;
+    const fork_result: linux.pid_t = @intCast(fork_rc);
     if (fork_result == 0) {
         try guestProcess(runnable, expected_notify_fd);
     } else {
@@ -51,6 +55,6 @@ fn supervisorProcess(allocator: Allocator, io: Io, uid: [16]u8, init_guest_tid: 
 
 pub fn generateUid() [16]u8 {
     var uid_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&uid_bytes);
+    _ = linux.getrandom(&uid_bytes, uid_bytes.len, 0);
     return std.fmt.bytesToHex(uid_bytes, .lower);
 }
