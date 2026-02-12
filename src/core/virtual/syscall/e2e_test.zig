@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
-const posix = std.posix;
+const iovec = std.posix.iovec;
+const iovec_const = std.posix.iovec_const;
 const testing = std.testing;
 
 const Supervisor = @import("../../Supervisor.zig");
@@ -498,7 +499,7 @@ test "unknown VFD returns EBADF across all handlers" {
     try testing.expectEqual(ebadf, close_resp.@"error");
 
     // readv
-    var iovecs_r = [_]posix.iovec{
+    var iovecs_r = [_]iovec{
         .{ .base = &buf, .len = buf.len },
     };
     const readv_resp = readv_handler(
@@ -514,7 +515,7 @@ test "unknown VFD returns EBADF across all handlers" {
 
     // writev
     const wv_data = "test";
-    var iovecs_w = [_]posix.iovec_const{
+    var iovecs_w = [_]iovec_const{
         .{ .base = wv_data.ptr, .len = wv_data.len },
     };
     const writev_resp = writev_handler(
