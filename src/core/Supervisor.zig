@@ -69,22 +69,27 @@ pub fn deinit(self: *Self) void {
     // LogBuffers are owned by caller, not freed here
 }
 
+const MAX_INFLIGHT = 8;
+const HandlerReturn = @typeInfo(@TypeOf(Self.handleNotif)).@"fn".return_type.?;
+
 /// Single reader loop with async dispatch for parallel syscall handling.
 /// Only one thread calls recv (avoiding a kernel bug where multiple workers
 /// competing for the recv ioctl can block forever when the seccomp filter dies).
 /// Each notification is dispatched to the Io thread pool for concurrent handling.
 pub fn run(self: *Self) !void {
-    const max_inflight = 8;
-    const HandlerReturn = @typeInfo(@TypeOf(Self.handleNotif)).@"fn".return_type.?;
-    var futures: [max_inflight]Io.Future(HandlerReturn) = undefined;
+    var futures: [MAX_INFLIGHT]Io.Future(HandlerReturn) = undefined;
     var count: usize = 0;
 
     while (true) {
         const notif = try self.recv() orelse break;
 
-        if (count >= max_inflight) {
-            try futures[0].await(self.io);
-            for (0..count - 1) |i| futures[i] = futures[i + 1];
+        if (count >= MAX_INFLIGHT) {
+            // We have too many outstanding futures, find the first to complete (blocking until so)
+            const done = try selectFirstDone(self.io, &futures, count);
+            // Then await (nonblocking since done) to propegate any errors
+            try futures[done].await(self.io);
+            // Shift the array down to remove the completed future
+            for (done..count - 1) |i| futures[i] = futures[i + 1];
             count -= 1;
         }
 
@@ -95,6 +100,20 @@ pub fn run(self: *Self) !void {
     for (futures[0..count]) |*f| {
         try f.await(self.io);
     }
+}
+
+/// Wait for the first future to complete, return its index
+fn selectFirstDone(io: Io, futures: []Io.Future(HandlerReturn), count: usize) !usize {
+    // Zig's Io.select public API is a bit messy for dynamic length arrays, so
+    // we use the underlying vtable.select interface which does exactly what we need
+    // given we first convert our futures to *Io.AnyFuture
+    var any_futures: [MAX_INFLIGHT]*Io.AnyFuture = undefined;
+    for (futures[0..count], 0..) |*f, i| {
+        any_futures[i] = f.any_future orelse return i;
+    }
+    // io.vtable.select blocks until one of the futures has a result ready
+    // it returns that index
+    return try io.vtable.select(io.userdata, any_futures[0..count]);
 }
 
 fn handleNotif(self: *Self, notif: linux.SECCOMP.notif) !void {
