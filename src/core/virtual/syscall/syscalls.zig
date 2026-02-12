@@ -30,6 +30,8 @@ const chdir = @import("handlers/chdir.zig");
 const fchdir = @import("handlers/fchdir.zig");
 const faccessat = @import("handlers/faccessat.zig");
 const pipe2 = @import("handlers/pipe2.zig");
+const socket = @import("handlers/socket.zig");
+const socketpair = @import("handlers/socketpair.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -54,6 +56,8 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .fchdir => fchdir.handle(notif, supervisor),
         .faccessat => faccessat.handle(notif, supervisor),
         .pipe2 => pipe2.handle(notif, supervisor),
+        .socket => socket.handle(notif, supervisor),
+        .socketpair => socketpair.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),
