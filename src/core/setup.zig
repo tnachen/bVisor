@@ -53,8 +53,8 @@ fn supervisorProcess(allocator: Allocator, io: Io, uid: [16]u8, init_guest_tid: 
     try supervisor.run();
 }
 
-pub fn generateUid() [16]u8 {
+pub fn generateUid(io: Io) [16]u8 {
     var uid_bytes: [8]u8 = undefined;
-    _ = linux.getrandom(&uid_bytes, uid_bytes.len, 0);
+    io.random(&uid_bytes);
     return std.fmt.bytesToHex(uid_bytes, .lower);
 }

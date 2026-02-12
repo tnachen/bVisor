@@ -71,7 +71,7 @@ pub fn main() !void {
     defer stdout.deinit();
     defer stderr.deinit();
 
-    try execute(allocator, io, setup.generateUid(), smokeTest, &stdout, &stderr);
+    try execute(allocator, io, setup.generateUid(io), smokeTest, &stdout, &stderr);
     try stdout.flush(io, File.stdout());
     try stderr.flush(io, File.stderr());
 }
