@@ -3,7 +3,7 @@ const config = @import("config");
 const linux = std.os.linux;
 const types = @import("../../types.zig");
 const Supervisor = @import("../../Supervisor.zig");
-const replyErr = @import("../../seccomp/notif.zig").replyErr;
+const LinuxErr = @import("../../linux_error.zig").LinuxErr;
 const replyContinue = @import("../../seccomp/notif.zig").replyContinue;
 
 const read = @import("handlers/read.zig");
@@ -37,7 +37,7 @@ const socketpair = @import("handlers/socketpair.zig");
 const connect = @import("handlers/connect.zig");
 const shutdown = @import("handlers/shutdown.zig");
 
-pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
     supervisor.logger.log("Handling syscall: {s}", .{@tagName(sys)});
     return switch (sys) {
@@ -138,7 +138,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .listen,
         .accept,
         .accept4,
-        => replyErr(notif.id, .PERM),
+        => LinuxErr.PERM,
 
         // Blocked - escape/privilege (return ENOSYS to indicate unavailable)
         .ptrace,
@@ -163,9 +163,9 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .prlimit64,
         // Blocked - execution domain exploits
         .personality,
-        => replyErr(notif.id, .NOSYS),
+        => LinuxErr.NOSYS,
 
-        else => handleUnsupported(notif.id, sys),
+        else => return handleUnsupported(notif.id, sys),
     };
 }
 
