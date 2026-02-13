@@ -1,14 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../linux_error.zig").LinuxErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: sendto(sockfd, buf, len, flags, dest_addr, addrlen)
@@ -26,14 +26,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
 
-        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
-            logger.log("sendto: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
-        };
+        const caller = try supervisor.guest_threads.get(caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("sendto: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
@@ -43,9 +40,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var max_buf: [max_len]u8 = undefined;
     const max_count = @min(count, max_len);
     const data: []u8 = max_buf[0..max_count];
-    memory_bridge.readSlice(data, caller_tid, buf_addr) catch {
-        return replyErr(notif.id, .FAULT);
-    };
+    try memory_bridge.readSlice(data, caller_tid, buf_addr);
 
     // Conditionally include a destination address
     // https://man7.org/linux/man-pages/man3/sendto.3p.html#DESCRIPTION
@@ -56,20 +51,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Read dest_addr from child memory if provided
     var addr_buf: [128]u8 = undefined;
     const dest_addr: ?[*]const u8 = if (dest_addr_ptr != 0 and addrlen > 0 and addrlen <= 128) blk: {
-        memory_bridge.readSlice(addr_buf[0..addrlen], caller_tid, dest_addr_ptr) catch {
-            return replyErr(notif.id, .FAULT);
-        };
+        try memory_bridge.readSlice(addr_buf[0..addrlen], caller_tid, dest_addr_ptr);
         break :blk &addr_buf;
     } else null;
 
     const actual_addrlen: linux.socklen_t = if (dest_addr != null) addrlen else 0;
 
-    const n = file.sendTo(data, flags, dest_addr, actual_addrlen) catch |err| {
-        return switch (err) {
-            error.NotASocket => replyErr(notif.id, .NOTSOCK),
-            else => replyErr(notif.id, .IO),
-        };
-    };
+    const n = try file.sendTo(data, flags, dest_addr, actual_addrlen);
 
     logger.log("sendto: fd={d} sent {d} bytes", .{ fd, n });
     return replySuccess(notif.id, @intCast(n));
@@ -77,7 +65,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
-const isError = @import("../../../seccomp/notif.zig").isError;
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
@@ -104,9 +91,7 @@ test "sendto unknown caller returns ESRCH" {
         .arg5 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.SRCH))), resp.@"error");
+    try testing.expectError(error.SRCH, handle(notif, &supervisor));
 }
 
 test "sendto invalid vfd returns EBADF" {
@@ -130,9 +115,7 @@ test "sendto invalid vfd returns EBADF" {
         .arg5 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.BADF))), resp.@"error");
+    try testing.expectError(error.BADF, handle(notif, &supervisor));
 }
 
 test "sendto on non-socket file returns ENOTSOCK" {
@@ -160,9 +143,7 @@ test "sendto on non-socket file returns ENOTSOCK" {
         .arg5 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.NOTSOCK))), resp.@"error");
+    try testing.expectError(error.NOTSOCK, handle(notif, &supervisor));
 }
 
 test "sendto on socketpair succeeds" {
@@ -184,8 +165,7 @@ test "sendto on socketpair succeeds" {
         .arg2 = 0,
         .arg3 = @intFromPtr(&sv),
     });
-    const sp_resp = socketpair_handler.handle(sp_notif, &supervisor);
-    try testing.expect(!isError(sp_resp));
+    _ = try socketpair_handler.handle(sp_notif, &supervisor);
 
     // Send data on sv[0]
     var data = "sendto test".*;
@@ -199,8 +179,7 @@ test "sendto on socketpair succeeds" {
         .arg5 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(!isError(resp));
+    const resp = try handle(notif, &supervisor);
     try testing.expectEqual(@as(i64, @intCast(data.len)), resp.val);
 }
 
@@ -224,8 +203,7 @@ test "sendto + recvfrom round-trip" {
         .arg2 = 0,
         .arg3 = @intFromPtr(&sv),
     });
-    const sp_resp = socketpair_handler.handle(sp_notif, &supervisor);
-    try testing.expect(!isError(sp_resp));
+    _ = try socketpair_handler.handle(sp_notif, &supervisor);
 
     // Send data on sv[0]
     var send_data = "round-trip test data".*;
@@ -238,8 +216,7 @@ test "sendto + recvfrom round-trip" {
         .arg4 = 0,
         .arg5 = 0,
     });
-    const send_resp = handle(send_notif, &supervisor);
-    try testing.expect(!isError(send_resp));
+    _ = try handle(send_notif, &supervisor);
 
     // Recv on sv[1]
     var recv_buf: [64]u8 = undefined;
@@ -250,8 +227,7 @@ test "sendto + recvfrom round-trip" {
         .arg2 = recv_buf.len,
         .arg3 = 0,
     });
-    const recv_resp = recvfrom_handler.handle(recv_notif, &supervisor);
-    try testing.expect(!isError(recv_resp));
+    const recv_resp = try recvfrom_handler.handle(recv_notif, &supervisor);
     const n: usize = @intCast(recv_resp.val);
     try testing.expectEqualStrings("round-trip test data", recv_buf[0..n]);
 }

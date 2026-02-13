@@ -1,19 +1,19 @@
 const std = @import("std");
 const linux = std.os.linux;
 const iovec = std.posix.iovec;
+const LinuxErr = @import("../../../linux_error.zig").LinuxErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 const MAX_IOV = 16;
 
 /// Recvmsg is the scattered read version of recv
 /// Similar to how readv is a scatter of read
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: recvmsg(sockfd, msg, flags)
@@ -28,23 +28,18 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
 
-        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
-            logger.log("recvmsg: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
-        };
+        const caller = try supervisor.guest_threads.get(caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("recvmsg: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
 
     // Read msghdr from guest memory
     // This is the scattered iovecs
-    var msg = memory_bridge.read(linux.msghdr, caller_tid, msg_ptr) catch {
-        return replyErr(notif.id, .FAULT);
-    };
+    var msg = try memory_bridge.read(linux.msghdr, caller_tid, msg_ptr);
 
     // Read iovec array from guest memory
     const iovec_count = @min(msg.iovlen, MAX_IOV);
@@ -53,9 +48,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     for (0..iovec_count) |i| {
         const iov_addr = @intFromPtr(msg.iov) + i * @sizeOf(iovec);
-        iovecs[i] = memory_bridge.read(iovec, caller_tid, iov_addr) catch {
-            return replyErr(notif.id, .FAULT);
-        };
+        iovecs[i] = try memory_bridge.read(iovec, caller_tid, iov_addr);
         total_requested += iovecs[i].len;
     }
 
@@ -69,17 +62,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var src_addrlen: linux.socklen_t = @sizeOf(@TypeOf(addr_buf));
     const wants_addr = msg.name != null;
 
-    const n = file.recvFrom(
+    const n = try file.recvFrom(
         recv_buf,
         flags,
         if (wants_addr) &addr_buf else null,
         if (wants_addr) &src_addrlen else null,
-    ) catch |err| {
-        return switch (err) {
-            error.NotASocket => replyErr(notif.id, .NOTSOCK),
-            else => replyErr(notif.id, .IO),
-        };
-    };
+    );
 
     // Scatter received data across guest iov buffers
     var bytes_written: usize = 0;
@@ -92,9 +80,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         const to_write = @min(iov.len, remaining);
 
         if (to_write > 0) {
-            memory_bridge.writeSlice(recv_buf[bytes_written..][0..to_write], caller_tid, buf_ptr) catch {
-                return replyErr(notif.id, .FAULT);
-            };
+            try memory_bridge.writeSlice(recv_buf[bytes_written..][0..to_write], caller_tid, buf_ptr);
             bytes_written += to_write;
         }
     }
@@ -103,9 +89,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     if (wants_addr and src_addrlen > 0) {
         const copy_len = @min(src_addrlen, msg.namelen);
         if (copy_len > 0) {
-            memory_bridge.writeSlice(addr_buf[0..copy_len], caller_tid, @intFromPtr(msg.name.?)) catch {
-                return replyErr(notif.id, .FAULT);
-            };
+            try memory_bridge.writeSlice(addr_buf[0..copy_len], caller_tid, @intFromPtr(msg.name.?));
         }
     }
 
@@ -113,9 +97,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     msg.namelen = if (wants_addr) src_addrlen else 0;
     msg.controllen = 0;
     msg.flags = 0;
-    memory_bridge.write(linux.msghdr, caller_tid, msg, msg_ptr) catch {
-        return replyErr(notif.id, .FAULT);
-    };
+    try memory_bridge.write(linux.msghdr, caller_tid, msg, msg_ptr);
 
     logger.log("recvmsg: fd={d} received {d} bytes", .{ fd, n });
     return replySuccess(notif.id, @intCast(n));
@@ -124,7 +106,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 const testing = std.testing;
 const iovec_const = std.posix.iovec_const;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
-const isError = @import("../../../seccomp/notif.zig").isError;
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
@@ -163,9 +144,7 @@ test "recvmsg unknown caller returns ESRCH" {
         .arg2 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.SRCH))), resp.@"error");
+    try testing.expectError(error.SRCH, handle(notif, &supervisor));
 }
 
 test "recvmsg invalid vfd returns EBADF" {
@@ -199,9 +178,7 @@ test "recvmsg invalid vfd returns EBADF" {
         .arg2 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.BADF))), resp.@"error");
+    try testing.expectError(error.BADF, handle(notif, &supervisor));
 }
 
 test "recvmsg on non-socket file returns ENOTSOCK" {
@@ -239,9 +216,7 @@ test "recvmsg on non-socket file returns ENOTSOCK" {
         .arg2 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.NOTSOCK))), resp.@"error");
+    try testing.expectError(error.NOTSOCK, handle(notif, &supervisor));
 }
 
 test "recvmsg on socketpair with single iovec" {
@@ -263,8 +238,7 @@ test "recvmsg on socketpair with single iovec" {
         .arg2 = 0,
         .arg3 = @intFromPtr(&sv),
     });
-    const sp_resp = socketpair_handler.handle(sp_notif, &supervisor);
-    try testing.expect(!isError(sp_resp));
+    _ = try socketpair_handler.handle(sp_notif, &supervisor);
 
     // Send data via sendto on sv[0]
     var send_data = "hello recvmsg".*;
@@ -277,8 +251,7 @@ test "recvmsg on socketpair with single iovec" {
         .arg4 = 0,
         .arg5 = 0,
     });
-    const send_resp = sendto_handler.handle(send_notif, &supervisor);
-    try testing.expect(!isError(send_resp));
+    _ = try sendto_handler.handle(send_notif, &supervisor);
 
     // Receive via recvmsg on sv[1]
     var recv_buf: [64]u8 = undefined;
@@ -302,8 +275,7 @@ test "recvmsg on socketpair with single iovec" {
         .arg2 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(!isError(resp));
+    const resp = try handle(notif, &supervisor);
     const n: usize = @intCast(resp.val);
     try testing.expectEqualStrings("hello recvmsg", recv_buf[0..n]);
 }
@@ -327,8 +299,7 @@ test "sendmsg + recvmsg multi-iovec scatter round-trip" {
         .arg2 = 0,
         .arg3 = @intFromPtr(&sv),
     });
-    const sp_resp = socketpair_handler.handle(sp_notif, &supervisor);
-    try testing.expect(!isError(sp_resp));
+    _ = try socketpair_handler.handle(sp_notif, &supervisor);
 
     // sendmsg with 3 iovecs: "aaa", "bbb", "ccc"
     var d1 = "aaa".*;
@@ -355,8 +326,7 @@ test "sendmsg + recvmsg multi-iovec scatter round-trip" {
         .arg1 = @intFromPtr(&send_msg),
         .arg2 = 0,
     });
-    const send_resp = sendmsg_handler.handle(send_notif, &supervisor);
-    try testing.expect(!isError(send_resp));
+    const send_resp = try sendmsg_handler.handle(send_notif, &supervisor);
     try testing.expectEqual(@as(i64, 9), send_resp.val);
 
     // recvmsg with 3 iovecs of len 3 each
@@ -384,8 +354,7 @@ test "sendmsg + recvmsg multi-iovec scatter round-trip" {
         .arg1 = @intFromPtr(&recv_msg),
         .arg2 = 0,
     });
-    const recv_resp = handle(recv_notif, &supervisor);
-    try testing.expect(!isError(recv_resp));
+    const recv_resp = try handle(recv_notif, &supervisor);
     try testing.expectEqual(@as(i64, 9), recv_resp.val);
 
     // Verify scatter correctness

@@ -1,14 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../linux_error.zig").LinuxErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
@@ -26,14 +26,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
 
-        const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
-            logger.log("recvfrom: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
-        };
+        const caller = try supervisor.guest_threads.get(caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("recvfrom: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
@@ -48,41 +45,28 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var src_addrlen: linux.socklen_t = @sizeOf(@TypeOf(addr_buf));
     const wants_addr = src_addr_ptr != 0 and addrlen_ptr != 0;
 
-    const n = file.recvFrom(
+    const n = try file.recvFrom(
         recv_buf,
         flags,
         if (wants_addr) &addr_buf else null,
         if (wants_addr) &src_addrlen else null,
-    ) catch |err| {
-        return switch (err) {
-            error.NotASocket => replyErr(notif.id, .NOTSOCK),
-            else => replyErr(notif.id, .IO),
-        };
-    };
+    );
 
     // Write received data to child memory
     if (n > 0) {
-        memory_bridge.writeSlice(recv_buf[0..n], caller_tid, buf_addr) catch {
-            return replyErr(notif.id, .FAULT);
-        };
+        try memory_bridge.writeSlice(recv_buf[0..n], caller_tid, buf_addr);
     }
 
     // Write source address back to guest memory
     if (wants_addr) {
         if (src_addrlen > 0) {
-            const guest_addrlen = memory_bridge.read(linux.socklen_t, caller_tid, addrlen_ptr) catch {
-                return replyErr(notif.id, .FAULT);
-            };
+            const guest_addrlen = try memory_bridge.read(linux.socklen_t, caller_tid, addrlen_ptr);
             const copy_len = @min(src_addrlen, guest_addrlen);
             if (copy_len > 0) {
-                memory_bridge.writeSlice(addr_buf[0..copy_len], caller_tid, src_addr_ptr) catch {
-                    return replyErr(notif.id, .FAULT);
-                };
+                try memory_bridge.writeSlice(addr_buf[0..copy_len], caller_tid, src_addr_ptr);
             }
         }
-        memory_bridge.write(linux.socklen_t, caller_tid, src_addrlen, addrlen_ptr) catch {
-            return replyErr(notif.id, .FAULT);
-        };
+        try memory_bridge.write(linux.socklen_t, caller_tid, src_addrlen, addrlen_ptr);
     }
 
     logger.log("recvfrom: fd={d} received {d} bytes", .{ fd, n });
@@ -91,7 +75,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
-const isError = @import("../../../seccomp/notif.zig").isError;
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
@@ -117,9 +100,7 @@ test "recvfrom unknown caller returns ESRCH" {
         .arg3 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.SRCH))), resp.@"error");
+    try testing.expectError(error.SRCH, handle(notif, &supervisor));
 }
 
 test "recvfrom invalid vfd returns EBADF" {
@@ -141,9 +122,7 @@ test "recvfrom invalid vfd returns EBADF" {
         .arg3 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.BADF))), resp.@"error");
+    try testing.expectError(error.BADF, handle(notif, &supervisor));
 }
 
 test "recvfrom on non-socket file returns ENOTSOCK" {
@@ -169,9 +148,7 @@ test "recvfrom on non-socket file returns ENOTSOCK" {
         .arg3 = 0,
     });
 
-    const resp = handle(notif, &supervisor);
-    try testing.expect(isError(resp));
-    try testing.expectEqual(-@as(i32, @intCast(@intFromEnum(linux.E.NOTSOCK))), resp.@"error");
+    try testing.expectError(error.NOTSOCK, handle(notif, &supervisor));
 }
 
 test "recvfrom on socketpair receives sent data" {
@@ -193,8 +170,7 @@ test "recvfrom on socketpair receives sent data" {
         .arg2 = 0,
         .arg3 = @intFromPtr(&sv),
     });
-    const sp_resp = socketpair_handler.handle(sp_notif, &supervisor);
-    try testing.expect(!isError(sp_resp));
+    _ = try socketpair_handler.handle(sp_notif, &supervisor);
 
     // Send data on sv[0]
     var send_data = "hello from recvfrom test".*;
@@ -207,8 +183,7 @@ test "recvfrom on socketpair receives sent data" {
         .arg4 = 0,
         .arg5 = 0,
     });
-    const send_resp = sendto_handler.handle(send_notif, &supervisor);
-    try testing.expect(!isError(send_resp));
+    _ = try sendto_handler.handle(send_notif, &supervisor);
 
     // Recv on sv[1]
     var recv_buf: [64]u8 = undefined;
@@ -219,8 +194,7 @@ test "recvfrom on socketpair receives sent data" {
         .arg2 = recv_buf.len,
         .arg3 = 0,
     });
-    const resp = handle(notif, &supervisor);
-    try testing.expect(!isError(resp));
+    const resp = try handle(notif, &supervisor);
     const n: usize = @intCast(resp.val);
     try testing.expect(n > 0);
     try testing.expectEqualStrings("hello from recvfrom test", recv_buf[0..n]);
