@@ -1,16 +1,17 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Supervisor = @import("../../../Supervisor.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 /// Writes the current working directory (null-terminated) into the caller's buffer.
 /// Returns the length of the path including the null terminator on success
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: getcwd(char *buf, size_t size)
@@ -24,7 +25,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         logger.log("getcwd: Thread not found for tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
     std.debug.assert(caller.tid == caller_tid);
 
@@ -33,12 +34,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Linux getcwd returns ERANGE if buffer is too small
     // Required size includes the null terminator
     if (buf_size < cwd.len + 1) {
-        return replyErr(notif.id, .RANGE);
+        return LinuxErr.RANGE;
     }
 
     // Write the null-terminated cwd to the caller's buffer
     memory_bridge.writeString(cwd, caller_tid, buf_addr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     // Return length including null terminator

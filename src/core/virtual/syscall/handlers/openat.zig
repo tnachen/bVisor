@@ -1,5 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
@@ -13,11 +15,10 @@ const Supervisor = @import("../../../Supervisor.zig");
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
 
@@ -29,13 +30,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var path_buf: [256]u8 = undefined;
     const path = memory_bridge.readString(&path_buf, caller_tid, path_ptr) catch |err| {
         logger.log("openat: failed to read path string: {}", .{err});
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     const dirfd: i32 = @truncate(@as(i64, @bitCast(notif.data.arg0)));
 
     if (path.len == 0) {
-        return replyErr(notif.id, .INVAL);
+        return LinuxErr.INVAL;
     }
 
     // Determine base directory for path resolution (copy to stack, release lock)
@@ -49,29 +50,29 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
 
         // Relative path with a real dirfd: use dirfd's opened path as base
         if (path[0] != '/' and dirfd != -100) {
             const dir_file = caller.fd_table.get_ref(dirfd) orelse {
                 logger.log("openat: EBADF for dirfd={d}", .{dirfd});
-                return replyErr(notif.id, .BADF);
+                return LinuxErr.BADF;
             };
             defer dir_file.unref();
 
             const dir_path = dir_file.opened_path orelse {
                 logger.log("openat: dirfd={d} has no associated path", .{dirfd});
-                return replyErr(notif.id, .NOTDIR);
+                return LinuxErr.NOTDIR;
             };
-            if (dir_path.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+            if (dir_path.len > base_buf.len) return LinuxErr.NAMETOOLONG;
             @memcpy(base_buf[0..dir_path.len], dir_path);
             break :blk base_buf[0..dir_path.len];
         }
 
         // Otherwise use cwd
         const c = caller.fs_info.cwd;
-        if (c.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+        if (c.len > base_buf.len) return LinuxErr.NAMETOOLONG;
         @memcpy(base_buf[0..c.len], c);
         break :blk base_buf[0..c.len];
     };
@@ -79,13 +80,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Resolve path against base and route through access rules
     var resolve_buf: [512]u8 = undefined;
     const route_result = resolveAndRoute(base, path, &resolve_buf) catch {
-        return replyErr(notif.id, .NAMETOOLONG);
+        return LinuxErr.NAMETOOLONG;
     };
 
     switch (route_result) {
         .block => {
             logger.log("openat: blocked path: {s}", .{path});
-            return replyErr(notif.id, .PERM);
+            return LinuxErr.PERM;
         },
         .handle => |h| {
             const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
@@ -99,7 +100,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
                 supervisor.guest_threads.syncNewThreads() catch |err| {
                     logger.log("openat: syncNewThreads failed: {}", .{err});
-                    return replyErr(notif.id, .NOSYS);
+                    return LinuxErr.NOSYS;
                 };
             }
 
@@ -108,24 +109,24 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             const file: *File = switch (h.backend) {
                 .passthrough => File.init(allocator, .{ .passthrough = Passthrough.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 } }) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 },
                 .cow => File.init(allocator, .{ .cow = Cow.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 } }) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 },
                 .tmp => File.init(allocator, .{ .tmp = Tmp.open(&supervisor.overlay, h.normalized, flags, mode) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 } }) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 },
                 .proc => File.init(allocator, .{
                     .proc = blk: {
@@ -136,16 +137,16 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
                         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
                             logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
-                            return replyErr(notif.id, .SRCH);
+                            return LinuxErr.SRCH;
                         };
                         break :blk ProcFile.open(caller, h.normalized) catch |err| {
                             logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                            return replyErr(notif.id, if (err == error.FileNotFound) .NOENT else .IO);
+                            return if (err == error.FileNotFound) LinuxErr.NOENT else LinuxErr.IO;
                         };
                     },
                 }) catch |err| {
                     logger.log("openat: failed to open {s}: {s}", .{ h.normalized, @errorName(err) });
-                    return replyErr(notif.id, .IO);
+                    return LinuxErr.IO;
                 },
             };
 
@@ -155,7 +156,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             // Store the opened path on the File (already normalized by resolveAndRoute)
             file.setOpenedPath(h.normalized) catch {
                 file.unref();
-                return replyErr(notif.id, .NOMEM);
+                return LinuxErr.NOMEM;
             };
 
             // Enter critical section for all backends
@@ -170,14 +171,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
             const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
                 logger.log("openat: Thread not found for tid={d}: {}", .{ caller_tid, err });
                 file.unref();
-                return replyErr(notif.id, .SRCH);
+                return LinuxErr.SRCH;
             };
 
             // Insert into fd table and return the virtual fd
             const vfd = caller.fd_table.insert(file, .{ .cloexec = flags.CLOEXEC }) catch {
                 logger.log("openat: failed to insert fd", .{});
                 file.unref();
-                return replyErr(notif.id, .MFILE);
+                return LinuxErr.MFILE;
             };
             logger.log("openat: opened {s} as vfd={d}", .{ h.normalized, vfd });
             return replySuccess(notif.id, @intCast(vfd));

@@ -1,14 +1,15 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: connect(sockfd, addr, addrlen)
@@ -19,7 +20,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     // Validate addrlen (sockaddr_storage max is 128)
     if (addrlen == 0 or addrlen > 128) {
-        return replyErr(notif.id, .INVAL);
+        return LinuxErr.INVAL;
     }
 
     // Critical section: File lookup
@@ -30,12 +31,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("connect: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("connect: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
@@ -43,13 +44,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Read sockaddr from guest memory
     var addr_buf: [128]u8 = undefined;
     memory_bridge.readSlice(addr_buf[0..addrlen], caller_tid, addr_ptr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     file.connect(&addr_buf, addrlen) catch |err| {
         return switch (err) {
-            error.NotASocket => replyErr(notif.id, .NOTSOCK),
-            else => replyErr(notif.id, .IO),
+            error.NotASocket => LinuxErr.NOTSOCK,
+            else => LinuxErr.IO,
         };
     };
 

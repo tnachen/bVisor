@@ -1,12 +1,13 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const Supervisor = @import("../../../Supervisor.zig");
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: dup(oldfd)
@@ -19,21 +20,21 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         logger.log("dup: Thread not found with tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
     std.debug.assert(caller.tid == caller_tid);
 
     // Look up oldfd
     const file = caller.fd_table.get_ref(oldfd) orelse {
         logger.log("dup: EBADF for oldfd={d}", .{oldfd});
-        return replyErr(notif.id, .BADF);
+        return LinuxErr.BADF;
     };
     defer file.unref();
 
     // Duplicate to next available fd
     const newfd = caller.fd_table.dup(file) catch {
         logger.log("dup: failed to allocate new fd", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     logger.log("dup: duplicated fd {d} -> {d}", .{ oldfd, newfd });

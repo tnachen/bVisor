@@ -1,18 +1,17 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Io = std.Io;
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
-
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
-
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: sysinfo(struct sysinfo *info)
@@ -21,10 +20,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get real kernel sysinfo (memory, loads, swap, etc.)
     var info: linux.Sysinfo = undefined;
     const rc = linux.sysinfo(&info);
-    if (linux.errno(rc) != .SUCCESS) {
-        logger.log("sysinfo: kernel sysinfo failed", .{});
-        return replyErr(notif.id, .NOSYS);
-    }
+    try checkErr(rc, "sysinfo: kernel sysinfo failed", .{}); // manually returned .NOSYS before
 
     // Virtualize only procs and uptime
     // TODO: come back and virtualize totalram and freeram
@@ -39,7 +35,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     const info_bytes = std.mem.asBytes(&info);
     memory_bridge.writeSlice(info_bytes, @intCast(notif.pid), buf_addr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     return replySuccess(notif.id, 0);

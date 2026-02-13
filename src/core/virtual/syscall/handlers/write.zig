@@ -1,5 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const types = @import("../../../types.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
@@ -9,14 +11,13 @@ const generateUid = @import("../../../setup.zig").generateUid;
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const isError = @import("../../../seccomp/notif.zig").isError;
 const isContinue = @import("../../../seccomp/notif.zig").isContinue;
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args
@@ -32,15 +33,15 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         const max_count = @min(count, max_len);
         const buf: []u8 = max_buf[0..max_count];
         memory_bridge.readSlice(buf, @intCast(caller_tid), buf_addr) catch {
-            return replyErr(notif.id, .FAULT);
+            return LinuxErr.FAULT;
         };
         if (fd == linux.STDOUT_FILENO) {
             supervisor.stdout.write(supervisor.io, buf) catch {
-                return replyErr(notif.id, .IO);
+                return LinuxErr.IO;
             };
         } else {
             supervisor.stderr.write(supervisor.io, buf) catch {
-                return replyErr(notif.id, .IO);
+                return LinuxErr.IO;
             };
         }
         return replySuccess(notif.id, @intCast(max_count));
@@ -56,13 +57,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("write: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
         std.debug.assert(caller.tid == caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("write: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
@@ -73,13 +74,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const max_count = @min(count, max_len);
     const buf: []u8 = max_buf[0..max_count];
     memory_bridge.readSlice(buf, @intCast(caller_tid), buf_addr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     // Write local buf to file
     const n = file.write(buf) catch |err| {
         logger.log("write: error writing to fd: {s}", .{@errorName(err)});
-        return replyErr(notif.id, .IO);
+        return LinuxErr.IO;
     };
 
     logger.log("write: wrote {d} bytes", .{n});

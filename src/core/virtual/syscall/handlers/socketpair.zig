@@ -1,14 +1,15 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
 
@@ -23,25 +24,21 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Create the kernel socket pair
     var kernel_fds: [2]i32 = undefined;
     const rc = linux.socketpair(domain, sock_type, protocol, &kernel_fds);
-    const errno = linux.errno(rc);
-    if (errno != .SUCCESS) {
-        logger.log("socketpair: kernel socketpair failed: {s}", .{@tagName(errno)});
-        return replyErr(notif.id, errno);
-    }
+    try checkErr(rc, "socketpair: kernel socketpair failed", .{});
 
     // Wrap both ends as passthrough Files
     const file0 = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fds[0] } }) catch {
         _ = linux.close(kernel_fds[0]);
         _ = linux.close(kernel_fds[1]);
         logger.log("socketpair: failed to alloc File 0", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     const file1 = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fds[1] } }) catch {
         file0.unref();
         _ = linux.close(kernel_fds[1]);
         logger.log("socketpair: failed to alloc File 1", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     // Register both in the caller's FdTable
@@ -52,14 +49,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         file0.unref();
         file1.unref();
         logger.log("socketpair: Thread not found for tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
 
     const vfd0 = caller.fd_table.insert(file0, .{ .cloexec = cloexec }) catch {
         file0.unref();
         file1.unref();
         logger.log("socketpair: failed to insert fd 0", .{});
-        return replyErr(notif.id, .MFILE);
+        return LinuxErr.MFILE;
     };
 
     const vfd1 = caller.fd_table.insert(file1, .{ .cloexec = cloexec }) catch {
@@ -67,7 +64,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         file0.unref();
         file1.unref();
         logger.log("socketpair: failed to insert fd 1", .{});
-        return replyErr(notif.id, .MFILE);
+        return LinuxErr.MFILE;
     };
 
     // Write the virtual fds back to the caller's sv[2] array
@@ -78,7 +75,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         file0.unref();
         file1.unref();
         logger.log("socketpair: failed to write fds to caller: {}", .{err});
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     logger.log("socketpair: created vfd0={d} vfd1={d}", .{ vfd0, vfd1 });

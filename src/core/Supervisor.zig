@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const Io = std.Io;
+const toLinuxE = @import("LinuxErr.zig").toLinuxE;
+const replyErr = @import("seccomp/notif.zig").replyErr;
 const types = @import("types.zig");
 const syscalls = @import("virtual/syscall/syscalls.zig");
 const Result = types.LinuxResult;
@@ -117,8 +119,10 @@ fn selectFirstDone(io: Io, futures: []Io.Future(HandlerReturn), count: usize) !u
 }
 
 fn handleNotif(self: *Self, notif: linux.SECCOMP.notif) !void {
-    const resp = syscalls.handle(notif, self);
-    try self.send(resp);
+    const notif_response = syscalls.handle(notif, self) catch |err| {
+        replyErr(notif.id, toLinuxE(err));
+    };
+    try self.send(notif_response);
 }
 
 fn recv(self: Self) !?linux.SECCOMP.notif {

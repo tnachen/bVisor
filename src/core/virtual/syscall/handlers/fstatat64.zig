@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
-
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Supervisor = @import("../../../Supervisor.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
@@ -8,11 +9,8 @@ const File = @import("../../fs/File.zig");
 const statxToStat = File.statxToStat;
 const path_router = @import("../../path.zig");
 const resolveAndRoute = path_router.resolveAndRoute;
-
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
-
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 const AT_EMPTY_PATH: u32 = 0x1000;
@@ -20,7 +18,7 @@ const AT_EMPTY_PATH: u32 = 0x1000;
 // fstatat64(dirfd, pathname, statbuf, flags)
 //   Mode 1: AT_EMPTY_PATH + empty pathname → equivalent to fstat(dirfd)
 //   Mode 2: Non-empty pathname → stat by path (no file opened)
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args
@@ -34,7 +32,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     var path_buf: [256]u8 = undefined;
     const path = memory_bridge.readString(&path_buf, caller_tid, pathname_ptr) catch |err| {
         logger.log("fstatat64: failed to read path string: {}", .{err});
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     // AT_EMPTY_PATH + empty pathname -> fd-based stat (same as fstat)
@@ -59,14 +57,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
             file = caller.fd_table.get_ref(dirfd) orelse {
                 logger.log("fstatat64: EBADF for fd={d}", .{dirfd});
-                return replyErr(notif.id, .BADF);
+                return LinuxErr.BADF;
             };
         }
         defer file.unref();
 
         const statx_buf = file.statx() catch |err| {
             logger.log("fstatat64: statx failed for fd={d}: {}", .{ dirfd, err });
-            return replyErr(notif.id, .IO);
+            return LinuxErr.IO;
         };
 
         return writeStatResponse(notif, statx_buf, statbuf_addr);
@@ -74,7 +72,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     // path-based stat
     if (path.len == 0) {
-        return replyErr(notif.id, .INVAL);
+        return LinuxErr.INVAL;
     }
 
     // Determine base directory for path resolution (copy to stack, release lock)
@@ -88,29 +86,29 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("fstatat64: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
 
         // Relative path with a real dirfd: use dirfd's opened path as base
         if (path[0] != '/' and dirfd != -100) {
             const dir_file = caller.fd_table.get_ref(dirfd) orelse {
                 logger.log("fstatat64: EBADF for dirfd={d}", .{dirfd});
-                return replyErr(notif.id, .BADF);
+                return LinuxErr.BADF;
             };
             defer dir_file.unref();
 
             const dir_path = dir_file.opened_path orelse {
                 logger.log("fstatat64: dirfd={d} has no associated path", .{dirfd});
-                return replyErr(notif.id, .NOTDIR);
+                return LinuxErr.NOTDIR;
             };
-            if (dir_path.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+            if (dir_path.len > base_buf.len) return LinuxErr.NAMETOOLONG;
             @memcpy(base_buf[0..dir_path.len], dir_path);
             break :blk base_buf[0..dir_path.len];
         }
 
         // Otherwise use cwd
         const c = caller.fs_info.cwd;
-        if (c.len > base_buf.len) return replyErr(notif.id, .NAMETOOLONG);
+        if (c.len > base_buf.len) return LinuxErr.NAMETOOLONG;
         @memcpy(base_buf[0..c.len], c);
         break :blk base_buf[0..c.len];
     };
@@ -118,13 +116,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Resolve path against base and route through access rules
     var resolve_buf: [512]u8 = undefined;
     const route_result = resolveAndRoute(base, path, &resolve_buf) catch {
-        return replyErr(notif.id, .NAMETOOLONG);
+        return LinuxErr.NAMETOOLONG;
     };
 
     switch (route_result) {
         .block => {
             logger.log("fstatat64: blocked path: {s}", .{path});
-            return replyErr(notif.id, .PERM);
+            return LinuxErr.PERM;
         },
         .handle => |h| {
             // Note all are lock-free (independent of internal Supervisor state) except for proc
@@ -136,18 +134,18 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
                 supervisor.guest_threads.syncNewThreads() catch |err| {
                     logger.log("fstatat64: syncNewThreads failed: {}", .{err});
-                    return replyErr(notif.id, .NOSYS);
+                    return LinuxErr.NOSYS;
                 };
 
                 caller = supervisor.guest_threads.get(caller_tid) catch |err| {
                     logger.log("fstatat64: Thread not found for tid={d}: {}", .{ caller_tid, err });
-                    return replyErr(notif.id, .SRCH);
+                    return LinuxErr.SRCH;
                 };
             }
 
             const statx_buf = File.statxByPath(h.backend, &supervisor.overlay, h.normalized, caller) catch |err| {
                 logger.log("fstatat64: statx failed for {s}: {s}", .{ h.normalized, @errorName(err) });
-                return replyErr(notif.id, if (err == error.FileNotFound) .NOENT else .IO);
+                return if (err == error.FileNotFound) LinuxErr.NOENT else LinuxErr.IO;
             };
 
             return writeStatResponse(notif, statx_buf, statbuf_addr);
@@ -159,7 +157,7 @@ fn writeStatResponse(notif: linux.SECCOMP.notif, statx_buf: linux.Statx, statbuf
     const stat_buf = statxToStat(statx_buf);
     const stat_bytes = std.mem.asBytes(&stat_buf);
     memory_bridge.writeSlice(stat_bytes, @intCast(notif.pid), statbuf_addr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
     return replySuccess(notif.id, 0);
 }

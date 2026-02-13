@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const types = @import("../../types.zig");
 const Supervisor = @import("../../Supervisor.zig");
+const LinuxErr = @import("../../LinuxErr.zig").LinuxErr;
 const replyErr = @import("../../seccomp/notif.zig").replyErr;
 const replyContinue = @import("../../seccomp/notif.zig").replyContinue;
 
@@ -36,7 +37,7 @@ const socketpair = @import("handlers/socketpair.zig");
 const connect = @import("handlers/connect.zig");
 const shutdown = @import("handlers/shutdown.zig");
 
-pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
     supervisor.logger.log("Handling syscall: {s}", .{@tagName(sys)});
     return switch (sys) {
@@ -90,7 +91,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .getrusage, // leaks resource usage
         => {
             supervisor.logger.log("Not implemented: {s}", .{@tagName(sys)});
-            return replyErr(notif.id, .NOSYS);
+            return LinuxErr.NOSYS;
         },
 
         // Passthrough - user identity (read-only)
@@ -138,7 +139,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .listen,
         .accept,
         .accept4,
-        => replyErr(notif.id, .PERM),
+        => LinuxErr.PERM,
 
         // Blocked - escape/privilege (return ENOSYS to indicate unavailable)
         .ptrace,
@@ -163,11 +164,11 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
         .prlimit64,
         // Blocked - execution domain exploits
         .personality,
-        => replyErr(notif.id, .NOSYS),
+        => LinuxErr.NOSYS,
 
         else => {
             supervisor.logger.log("Not supported: {s}", .{@tagName(sys)});
-            return replyErr(notif.id, .NOSYS);
+            return LinuxErr.NOSYS;
         },
     };
 }

@@ -1,11 +1,10 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
-
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
-
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const LogBuffer = @import("../../../LogBuffer.zig");
@@ -19,8 +18,8 @@ fn utsField(comptime str: []const u8) [64:0]u8 {
     return field;
 }
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
-    const logger = supervisor.logger;
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
+    _ = supervisor;
 
     // Parse args: uname(struct utsname *buf)
     const buf_addr: u64 = notif.data.arg0;
@@ -28,10 +27,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get real kernel utsname (sysname, release, version, machine)
     var uts: linux.utsname = undefined;
     const rc = linux.uname(&uts);
-    if (linux.errno(rc) != .SUCCESS) {
-        logger.log("uname: kernel uname failed", .{});
-        return replyErr(notif.id, .NOSYS);
-    }
+    try checkErr(rc, "uname: kernel uname failed", .{}); // manually returned .NOSYS before
 
     // Virtualize only identity-leaking fields
     uts.nodename = utsField("bvisor");
@@ -39,7 +35,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     const uts_bytes = std.mem.asBytes(&uts);
     memory_bridge.writeSlice(uts_bytes, @intCast(notif.pid), buf_addr) catch {
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     return replySuccess(notif.id, 0);

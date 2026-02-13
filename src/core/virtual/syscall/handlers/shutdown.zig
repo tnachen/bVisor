@@ -1,13 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: shutdown(sockfd, how)
@@ -23,20 +24,20 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("shutdown: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("shutdown: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
 
     file.shutdown(how) catch |err| {
         return switch (err) {
-            error.NotASocket => replyErr(notif.id, .NOTSOCK),
-            else => replyErr(notif.id, .IO),
+            error.NotASocket => LinuxErr.NOTSOCK,
+            else => LinuxErr.IO,
         };
     };
 

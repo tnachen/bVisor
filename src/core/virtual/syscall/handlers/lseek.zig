@@ -1,13 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: lseek(fd, offset, whence)
@@ -18,7 +19,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     // stdin/stdout/stderr are not seekable
     if (fd == linux.STDIN_FILENO or fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
-        return replyErr(notif.id, .SPIPE);
+        return LinuxErr.SPIPE;
     }
 
     // Critical section: File lookup
@@ -30,20 +31,20 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("lseek: Thread not found for tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
         std.debug.assert(caller.tid == caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("lseek: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
 
     const new_offset = file.lseek(offset, whence) catch |err| {
         logger.log("lseek: error for fd={d}: {s}", .{ fd, @errorName(err) });
-        return replyErr(notif.id, .INVAL);
+        return LinuxErr.INVAL;
     };
 
     logger.log("lseek: fd={d} new_offset={d}", .{ fd, new_offset });

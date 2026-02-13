@@ -1,5 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
 
 const builtin = @import("builtin");
@@ -10,24 +11,19 @@ fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
     const rc = linux.openat(linux.AT.FDCWD, path_buf[0..path.len :0], flags, mode);
-    const errno = linux.errno(rc);
-    if (errno != .SUCCESS) return switch (errno) {
-        .NOENT => error.FileNotFound,
-        .ACCES, .PERM => error.AccessDenied,
-        else => error.SyscallFailed,
-    };
+    try checkErr(rc, "tmp.sysOpenat", .{});
     return @intCast(rc);
 }
 
 fn sysRead(fd: linux.fd_t, buf: []u8) !usize {
     const rc = linux.read(fd, buf.ptr, buf.len);
-    if (linux.errno(rc) != .SUCCESS) return error.SyscallFailed;
+    try checkErr(rc, "tmp.sysRead", .{});
     return rc;
 }
 
 fn sysWrite(fd: linux.fd_t, data: []const u8) !usize {
     const rc = linux.write(fd, data.ptr, data.len);
-    if (linux.errno(rc) != .SUCCESS) return error.SyscallFailed;
+    try checkErr(rc, "tmp.sysWrite", .{});
     return rc;
 }
 
@@ -64,7 +60,7 @@ pub const Tmp = struct {
             linux.STATX.BASIC_STATS,
             &statx_buf,
         );
-        if (linux.errno(rc) != .SUCCESS) return error.StatxFail;
+        try checkErr(rc, "tmp.statx", .{});
         return statx_buf;
     }
 
@@ -85,14 +81,14 @@ pub const Tmp = struct {
             linux.STATX.BASIC_STATS,
             &statx_buf,
         );
-        if (linux.errno(rc) != .SUCCESS) return error.StatxFail;
+        try checkErr(rc, "tmp.statxByPath", .{});
         return statx_buf;
     }
 
     pub fn lseek(self: *Tmp, offset: i64, whence: u32) !i64 {
-        const result = linux.lseek(self.fd, offset, @intCast(whence));
-        if (linux.errno(result) != .SUCCESS) return error.SyscallFailed;
-        return @intCast(result);
+        const rc = linux.lseek(self.fd, offset, @intCast(whence));
+        try checkErr(rc, "tmp.lseek", .{});
+        return @intCast(rc);
     }
 
     pub fn connect(self: *Tmp, addr: [*]const u8, addrlen: linux.socklen_t) !void {

@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Supervisor = @import("../../../Supervisor.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
@@ -8,11 +10,10 @@ const File = @import("../../fs/File.zig");
 const path_router = @import("../../path.zig");
 const route = path_router.route;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
 /// Changes the current working directory to the directory referenced by the given fd.
 /// The fd must have been opened with openat and must refer to a directory.
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args: fchdir(int fd)
@@ -25,45 +26,45 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         logger.log("fchdir: Thread not found for tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
     std.debug.assert(caller.tid == caller_tid);
 
     // Look up fd in caller's fd_table
     const file = caller.fd_table.get_ref(fd) orelse {
         logger.log("fchdir: EBADF for fd={d}", .{fd});
-        return replyErr(notif.id, .BADF);
+        return LinuxErr.BADF;
     };
     defer file.unref();
 
     // Get the path this fd was opened with
     const path = file.opened_path orelse {
         logger.log("fchdir: fd={d} has no associated path", .{fd});
-        return replyErr(notif.id, .NOTDIR);
+        return LinuxErr.NOTDIR;
     };
 
     // Validate path through routing rules before updating cwd
     const route_result = route(path) catch {
-        return replyErr(notif.id, .NAMETOOLONG);
+        return LinuxErr.NAMETOOLONG;
     };
     if (route_result == .block) {
         logger.log("fchdir: blocked path: {s}", .{path});
-        return replyErr(notif.id, .PERM);
+        return LinuxErr.PERM;
     }
 
     // Verify it's a directory via statx
     const statx_buf = file.statx() catch |err| {
         logger.log("fchdir: statx failed for fd={d}: {}", .{ fd, err });
-        return replyErr(notif.id, .IO);
+        return LinuxErr.IO;
     };
 
     if (statx_buf.mode & linux.S.IFMT != linux.S.IFDIR) {
-        return replyErr(notif.id, .NOTDIR);
+        return LinuxErr.NOTDIR;
     }
 
     // Update cwd
     caller.fs_info.setCwd(path) catch {
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     logger.log("fchdir: changed to {s}", .{caller.fs_info.cwd});

@@ -1,5 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Supervisor = @import("../../../Supervisor.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const LogBuffer = @import("../../../LogBuffer.zig");
@@ -13,11 +15,10 @@ const proc_info = @import("../../../utils/proc_info.zig");
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const isError = @import("../../../seccomp/notif.zig").isError;
 
 /// getppid return the namespaced TGID of the parent thread
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
 
@@ -27,7 +28,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         std.log.err("getppid: Thread not found with tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
     std.debug.assert(caller.tid == caller_tid);
 
@@ -38,7 +39,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const parent_process = caller.thread_group.parent orelse return replySuccess(notif.id, 0);
     const parent = parent_process.getLeader() catch |err| {
         std.log.err("getppid: Thread not found with tid={d}: {}", .{ parent_process.tgid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
     if (!caller.canSee(parent)) return replySuccess(notif.id, 0);
 

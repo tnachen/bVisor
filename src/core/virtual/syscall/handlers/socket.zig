@@ -1,13 +1,14 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
 
@@ -20,18 +21,15 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     // Create the kernel socket
     const rc = linux.socket(domain, sock_type, protocol);
-    const errno = linux.errno(rc);
-    if (errno != .SUCCESS) {
-        logger.log("socket: kernel socket failed: {s}", .{@tagName(errno)});
-        return replyErr(notif.id, errno);
-    }
+    try checkErr(rc, "socket: kernel socket failed", .{});
+
     const kernel_fd: i32 = @intCast(rc);
 
     // Wrap as passthrough File
     const file = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fd } }) catch {
         _ = linux.close(kernel_fd);
         logger.log("socket: failed to alloc File", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     // Register in the caller's FdTable
@@ -41,13 +39,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         file.unref();
         logger.log("socket: Thread not found for tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
 
     const vfd = caller.fd_table.insert(file, .{ .cloexec = cloexec }) catch {
         file.unref();
         logger.log("socket: failed to insert fd", .{});
-        return replyErr(notif.id, .MFILE);
+        return LinuxErr.MFILE;
     };
 
     logger.log("socket: created vfd={d}", .{vfd});

@@ -2,6 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 
+// want to get rid of LinuxResult
+// is sorta like an error union, but don't get a try on it. so the unwrap is the try equivalent
+// our new design is to just to convert a linux error code into a literal error and then bubbling that up with Zig's compiler
+// everywhere where this is used, use our simpler handling instead of this unwrap stuff
 pub fn LinuxResult(comptime T: type) type {
     return union(enum) {
         Ok: T,

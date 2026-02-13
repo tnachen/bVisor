@@ -1,15 +1,16 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Passthrough = @import("../../fs/backend/passthrough.zig").Passthrough;
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
     const allocator = supervisor.allocator;
 
@@ -22,25 +23,21 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Create the kernel pipe
     var kernel_fds: [2]i32 = undefined;
     const rc = linux.pipe2(&kernel_fds, @bitCast(flags));
-    const errno = linux.errno(rc);
-    if (errno != .SUCCESS) {
-        logger.log("pipe2: kernel pipe2 failed: {s}", .{@tagName(errno)});
-        return replyErr(notif.id, errno);
-    }
+    try checkErr(rc, "pipe2: kernel pipe2 failed", .{});
 
     // Wrap both ends as passthrough Files
     const read_file = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fds[0] } }) catch {
         _ = linux.close(kernel_fds[0]);
         _ = linux.close(kernel_fds[1]);
         logger.log("pipe2: failed to alloc read File", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     const write_file = File.init(allocator, .{ .passthrough = .{ .fd = kernel_fds[1] } }) catch {
         read_file.unref(); // already closes kernel_fds[0] via Passthrough.close
         _ = linux.close(kernel_fds[1]);
         logger.log("pipe2: failed to alloc write File", .{});
-        return replyErr(notif.id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     // Register both in the caller's FdTable
@@ -52,14 +49,14 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         read_file.unref();
         write_file.unref();
         logger.log("pipe2: Thread not found for tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
 
     const read_vfd = caller.fd_table.insert(read_file, .{ .cloexec = cloexec }) catch {
         read_file.unref();
         write_file.unref();
         logger.log("pipe2: failed to insert read fd", .{});
-        return replyErr(notif.id, .MFILE);
+        return LinuxErr.MFILE;
     };
 
     const write_vfd = caller.fd_table.insert(write_file, .{ .cloexec = cloexec }) catch {
@@ -67,7 +64,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         read_file.unref();
         write_file.unref();
         logger.log("pipe2: failed to insert write fd", .{});
-        return replyErr(notif.id, .MFILE);
+        return LinuxErr.MFILE;
     };
 
     // Write the virtual fds back to the caller's pipefd[2] array
@@ -78,7 +75,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         read_file.unref();
         write_file.unref();
         logger.log("pipe2: failed to write fds to caller: {}", .{err});
-        return replyErr(notif.id, .FAULT);
+        return LinuxErr.FAULT;
     };
 
     logger.log("pipe2: created pipe read_vfd={d} write_vfd={d}", .{ read_vfd, write_vfd });

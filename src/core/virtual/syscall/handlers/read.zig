@@ -1,5 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const types = @import("../../../types.zig");
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
@@ -9,7 +11,6 @@ const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const isError = @import("../../../seccomp/notif.zig").isError;
 const isContinue = @import("../../../seccomp/notif.zig").isContinue;
@@ -17,7 +18,7 @@ const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     // Parse args
@@ -42,13 +43,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
         // Get caller Thread
         const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
             logger.log("read: Thread not found with tid={d}: {}", .{ caller_tid, err });
-            return replyErr(notif.id, .SRCH);
+            return LinuxErr.SRCH;
         };
         std.debug.assert(caller.tid == caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("read: EBADF for fd={d}", .{fd});
-            return replyErr(notif.id, .BADF);
+            return LinuxErr.BADF;
         };
     }
     defer file.unref();
@@ -63,13 +64,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
     const n = file.read(read_buf) catch |err| {
         logger.log("read: error reading from fd: {s}", .{@errorName(err)});
-        return replyErr(notif.id, .IO);
+        return LinuxErr.IO;
     };
 
     // Copy into child memory space
     if (n > 0) {
         memory_bridge.writeSlice(read_buf[0..n], @intCast(notif.pid), buf_addr) catch {
-            return replyErr(notif.id, .FAULT);
+            return LinuxErr.FAULT;
         };
     }
 

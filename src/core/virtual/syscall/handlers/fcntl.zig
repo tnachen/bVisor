@@ -1,19 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const LinuxErr = @import("../../../LinuxErr.zig").LinuxErr;
+const checkErr = @import("../../../LinuxErr.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const Supervisor = @import("../../../Supervisor.zig");
-const replyErr = @import("../../../seccomp/notif.zig").replyErr;
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const Logger = @import("../../../types.zig").Logger;
-
 const F = linux.F;
 
 /// F_DUPFD_CLOEXEC is not in Zig's linux.F struct
 const F_DUPFD_CLOEXEC = 1030;
 
-pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP.notif_resp {
+pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
     const caller_tid: AbsTid = @intCast(notif.pid);
@@ -27,7 +27,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
     // Get caller Thread
     const caller = supervisor.guest_threads.get(caller_tid) catch |err| {
         logger.log("fcntl: Thread not found with tid={d}: {}", .{ caller_tid, err });
-        return replyErr(notif.id, .SRCH);
+        return LinuxErr.SRCH;
     };
 
     return switch (cmd) {
@@ -58,7 +58,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.SECCOMP
 
         else => {
             logger.log("fcntl: unsupported cmd={d} on fd={d}", .{ cmd, fd });
-            return replyErr(notif.id, .INVAL);
+            return LinuxErr.INVAL;
         },
     };
 }
@@ -77,13 +77,13 @@ fn handleDupFd(
 
     const file = caller.fd_table.get_ref(fd) orelse {
         logger.log("fcntl: F_DUPFD EBADF for fd={d}", .{fd});
-        return replyErr(id, .BADF);
+        return LinuxErr.BADF;
     };
     defer file.unref();
 
     const newfd = caller.fd_table.dup(file) catch {
         logger.log("fcntl: F_DUPFD failed to allocate new fd", .{});
-        return replyErr(id, .NOMEM);
+        return LinuxErr.NOMEM;
     };
 
     // CLOEXEC defaults to false
@@ -106,7 +106,7 @@ fn handleGetFd(
     // Verify the fd exists
     const file = caller.fd_table.get_ref(fd) orelse {
         logger.log("fcntl: F_GETFD EBADF for fd={d}", .{fd});
-        return replyErr(id, .BADF);
+        return LinuxErr.BADF;
     };
     file.unref();
 
@@ -128,7 +128,7 @@ fn handleSetFd(
 
     if (!caller.fd_table.setCloexec(fd, new_cloexec)) {
         logger.log("fcntl: F_SETFD EBADF for fd={d}", .{fd});
-        return replyErr(id, .BADF);
+        return LinuxErr.BADF;
     }
 
     logger.log("fcntl: F_SETFD fd={d} cloexec={}", .{ fd, new_cloexec });
@@ -144,7 +144,7 @@ fn handleGetFl(
 ) linux.SECCOMP.notif_resp {
     const file = caller.fd_table.get_ref(fd) orelse {
         logger.log("fcntl: F_GETFL EBADF for fd={d}", .{fd});
-        return replyErr(id, .BADF);
+        return LinuxErr.BADF;
     };
     defer file.unref();
 
@@ -163,7 +163,7 @@ fn handleSetFl(
 ) linux.SECCOMP.notif_resp {
     const file = caller.fd_table.get_ref(fd) orelse {
         logger.log("fcntl: F_SETFL EBADF for fd={d}", .{fd});
-        return replyErr(id, .BADF);
+        return LinuxErr.BADF;
     };
     defer file.unref();
 
@@ -184,10 +184,7 @@ fn handleSetFl(
         if (file.backingFd()) |backing_fd| {
             const flags_u32: u32 = @bitCast(updated);
             const rc = linux.fcntl(backing_fd, F.SETFL, @as(usize, flags_u32));
-            if (linux.errno(rc) != .SUCCESS) {
-                logger.log("fcntl: F_SETFL kernel propagation failed for fd={d}", .{fd});
-                return replyErr(id, .INVAL);
-            }
+            try checkErr(rc, "fcntl: F_SETFL kernel propagation failed for fd={d}", .{fd}); // used to manually return .INVAL
         }
     }
 
