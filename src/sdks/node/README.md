@@ -9,7 +9,7 @@ Requires: Zig 0.16+, Docker
 From the repo root (next to build.zig), run:
 
 ```bash
-zig build test-node
+zig build run-node
 ```
 
 For a targeted test, from this directory, run:

@@ -18,6 +18,7 @@ The goal of bVisor is to be a lightweight sandbox for untrusted user or LLM-gene
 zig build                    # Build all targets (exe, tests, node .node binaries)
 zig build test               # Run unit tests in Docker container
 zig build run                # Run executable in Docker container
+zig build run-node           # Run E2E node SDK tests with current zig core build
 ```
 
 

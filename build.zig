@@ -166,10 +166,10 @@ pub fn build(b: *std.Build) void {
     docker_test_cmd.step.dependOn(test_install_step.?);
     test_cli_step.dependOn(&docker_test_cmd.step);
 
-    // 'test-node' runs Node SDK test in a Docker container
-    const node_cli_step = b.step("test-node", "Run Node SDK test.ts in Docker container against the current build");
+    // 'run-node' runs Node SDK test in a Docker container
+    const node_cli_step = b.step("run-node", "Run Node SDK test.ts in Docker container against the current build");
     if (arch != builtin.cpu.arch) {
-        node_cli_step.dependOn(&b.addFail("zig build test-node requires native arch").step);
+        node_cli_step.dependOn(&b.addFail("zig build run-node requires native arch").step);
     } else {
         const node_cmd = b.addSystemCommand(&.{
             "docker", "run",                  "--rm",                       "--security-opt", "seccomp=unconfined",
