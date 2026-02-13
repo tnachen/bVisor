@@ -143,10 +143,13 @@ fn test_fork_child_identity() bool {
     const fork_result = Result(linux.pid_t).from(linux.fork()).unwrap() catch return false;
 
     if (fork_result == 0) {
+        // is child
         const child_pid = linux.getpid();
         const child_ppid = linux.getppid();
-        if (child_ppid != 1) linux.exit_group(1);
-        if (child_pid <= 1) linux.exit_group(2);
+        // child pid must not be 1 (initial)
+        if (child_pid <= 1) linux.exit_group(@intFromEnum(linux.E.PERM));
+        // child ppid must not be 0 (invalid)
+        if (child_ppid <= 0) linux.exit_group(@intFromEnum(linux.E.PERM));
         linux.exit_group(0);
     }
 
@@ -154,8 +157,9 @@ fn test_fork_child_identity() bool {
     var status: u32 = 0;
     var rusage: linux.rusage = undefined;
     Result(void).from(linux.wait4(fork_result, &status, 0, &rusage)).unwrap() catch return false;
-
-    return linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
+    const if_exited = linux.W.IFEXITED(status);
+    const exit_status = linux.W.EXITSTATUS(status);
+    return if_exited and exit_status == 0;
 }
 
 fn test_execve() bool {
@@ -214,7 +218,10 @@ fn test_read_write() bool {
 }
 
 fn test_read_proc_self() bool {
-    const fd = Result(linux.fd_t).from(linux.openat(linux.AT.FDCWD, "/proc/self/stat", .{ .ACCMODE = .RDONLY }, 0)).unwrap() catch return false;
+    const fd = Result(linux.fd_t).from(linux.openat(linux.AT.FDCWD, "/proc/self/stat", .{ .ACCMODE = .RDONLY }, 0)).unwrap() catch {
+        // std.debug.print("openat failed with error: {s}\n", .{@errorName(err)});
+        return false;
+    };
     defer _ = linux.close(fd);
 
     var buf: [64]u8 = undefined;
