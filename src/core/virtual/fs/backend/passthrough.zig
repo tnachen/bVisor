@@ -100,6 +100,19 @@ pub const Passthrough = struct {
         const rc = linux.shutdown(self.fd, how);
         if (linux.errno(rc) != .SUCCESS) return error.SyscallFailed;
     }
+
+    pub fn recvFrom(self: *Passthrough, buf: []u8, flags: u32) !usize {
+        const rc = linux.recvfrom(self.fd, buf.ptr, buf.len, flags, null, null);
+        if (linux.errno(rc) != .SUCCESS) return error.SyscallFailed;
+        return rc;
+    }
+
+    pub fn sendTo(self: *Passthrough, data: []const u8, flags: u32, dest_addr: ?[*]const u8, addrlen: linux.socklen_t) !usize {
+        const addr: ?*const linux.sockaddr = if (dest_addr) |a| @ptrCast(@alignCast(a)) else null;
+        const rc = linux.sendto(self.fd, data.ptr, data.len, flags, addr, addrlen);
+        if (linux.errno(rc) != .SUCCESS) return error.SyscallFailed;
+        return rc;
+    }
 };
 
 const testing = std.testing;

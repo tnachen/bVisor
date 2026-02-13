@@ -104,6 +104,16 @@ pub const Tmp = struct {
         _ = .{ self, how };
         return error.NotASocket;
     }
+
+    pub fn recvFrom(self: *Tmp, buf: []u8, flags: u32) !usize {
+        _ = .{ self, buf, flags };
+        return error.NotASocket;
+    }
+
+    pub fn sendTo(self: *Tmp, data: []const u8, flags: u32, dest_addr: ?[*]const u8, addrlen: linux.socklen_t) !usize {
+        _ = .{ self, data, flags, dest_addr, addrlen };
+        return error.NotASocket;
+    }
 };
 
 const testing = std.testing;

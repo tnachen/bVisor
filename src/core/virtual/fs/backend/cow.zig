@@ -142,6 +142,16 @@ pub const Cow = union(enum) {
         _ = .{ self, how };
         return error.NotASocket;
     }
+
+    pub fn recvFrom(self: *Cow, buf: []u8, flags: u32) !usize {
+        _ = .{ self, buf, flags };
+        return error.NotASocket;
+    }
+
+    pub fn sendTo(self: *Cow, data: []const u8, flags: u32, dest_addr: ?[*]const u8, addrlen: linux.socklen_t) !usize {
+        _ = .{ self, data, flags, dest_addr, addrlen };
+        return error.NotASocket;
+    }
 };
 
 /// Copy a file from src to dst
