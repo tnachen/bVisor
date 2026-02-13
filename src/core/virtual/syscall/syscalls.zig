@@ -171,7 +171,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
 }
 
 /// Handle an unsupported syscall.
-/// Returns an error if compiled with `-Dfail_loudly`, otherwise silently returns ENOSYS.
+/// Returns an error if compiled with `-Dfail-loudly`, otherwise silently returns ENOSYS.
 fn handleUnsupported(id: u64, syscall: linux.SYS) linux.SECCOMP.notif_resp {
     if (config.fail_loudly) {
         std.debug.panic("Unsupported syscall: {s}", .{@tagName(syscall)});
