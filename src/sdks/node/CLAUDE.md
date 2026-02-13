@@ -25,12 +25,6 @@ src/sdks/node/
 
 Opaque handles use `External<T>` (defined in `napi.ts`) on the TS side. On the Zig side, `ZigExternal(T)` in `zig/napi.zig` handles wrapping/unwrapping — all JS-facing values are plain `c.napi_value`.
 
-## Build
-
-`zig build` (from project root) cross-compiles native binaries for both linux platforms. The build is defined in the root `build.zig` which loops over aarch64 and x86_64 targets.
-
-`npm run dev` runs `zig build` then executes `test.ts` inside a `oven/bun:alpine` Docker container.
-
 ## Platform packages
 
 The `platforms/` subdirectories are npm workspace packages. `npm install` on Linux resolves them locally via workspaces. On macOS, `npm install` will fail due to `os`/`cpu` filtering in the platform package.json files -- use `npm run dev` to build and test in Docker instead.

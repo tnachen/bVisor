@@ -4,6 +4,10 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
+    const options = b.addOptions();
+    const fail_loudly = b.option(bool, "fail-loudly", "crash immediately on unsupported syscall") orelse false;
+    options.addOption(bool, "fail_loudly", fail_loudly);
+
     // Callers can select an architecture to target
     // It defaults to the host architecture
     const Arch = enum { aarch64, x86_64 };
@@ -59,6 +63,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        // Add config module to enable fail-loudly from core
+        core_module.addOptions("config", options);
 
         const node_lib = b.addLibrary(.{
             .name = "libbvisor",
@@ -70,6 +76,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
+
         node_lib.root_module.addImport("core", core_module);
         node_lib.root_module.addIncludePath(node_api.path("include"));
         node_lib.linker_allow_shlib_undefined = true;
@@ -104,6 +111,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+        // Add config module to enable fail-loudly
+        linux_exe.root_module.addOptions("config", options);
+
         const exe_install = b.addInstallArtifact(linux_exe, .{
             .dest_sub_path = b.fmt("bVisor{s}", .{t.suffix}),
         });
@@ -154,10 +164,10 @@ pub fn build(b: *std.Build) void {
     docker_test_cmd.step.dependOn(test_install_step.?);
     test_cli_step.dependOn(&docker_test_cmd.step);
 
-    // 'test-node' runs Node SDK test in a Docker container
-    const node_cli_step = b.step("test-node", "Run Node SDK test.ts in Docker container against the current build");
+    // 'run-node' runs Node SDK test in a Docker container
+    const node_cli_step = b.step("run-node", "Run Node SDK test.ts in Docker container against the current build");
     if (arch != builtin.cpu.arch) {
-        node_cli_step.dependOn(&b.addFail("zig build test-node requires native arch").step);
+        node_cli_step.dependOn(&b.addFail("zig build run-node requires native arch").step);
     } else {
         const node_cmd = b.addSystemCommand(&.{
             "docker", "run",                  "--rm",                       "--security-opt", "seccomp=unconfined",

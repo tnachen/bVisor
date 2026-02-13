@@ -1,9 +1,11 @@
 const std = @import("std");
+const config = @import("config");
 const linux = std.os.linux;
 const types = @import("../../types.zig");
 const Supervisor = @import("../../Supervisor.zig");
 const LinuxErr = @import("../../linux_error.zig").LinuxErr;
 const replyContinue = @import("../../seccomp/notif.zig").replyContinue;
+const replyErr = @import("../../seccomp/notif.zig").replyErr;
 
 const read = @import("handlers/read.zig");
 const write = @import("handlers/write.zig");
@@ -97,8 +99,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .getrlimit, // leaks resource config
         .getrusage, // leaks resource usage
         => {
-            supervisor.logger.log("Not implemented: {s}", .{@tagName(sys)});
-            return LinuxErr.NOSYS;
+            return handleUnsupported(notif.id, sys);
         },
 
         // Passthrough - user identity (read-only)
@@ -173,9 +174,15 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .personality,
         => LinuxErr.NOSYS,
 
-        else => {
-            supervisor.logger.log("Not supported: {s}", .{@tagName(sys)});
-            return LinuxErr.NOSYS;
-        },
+        else => return handleUnsupported(notif.id, sys),
     };
+}
+
+/// Handle an unsupported syscall.
+/// Returns an error if compiled with `-Dfail-loudly`, otherwise silently returns ENOSYS.
+fn handleUnsupported(id: u64, syscall: linux.SYS) linux.SECCOMP.notif_resp {
+    if (config.fail_loudly) {
+        std.debug.panic("Unsupported syscall: {s}", .{@tagName(syscall)});
+    }
+    return replyErr(id, .NOSYS);
 }
