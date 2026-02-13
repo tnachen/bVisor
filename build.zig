@@ -4,6 +4,12 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
+    const options = b.addOptions();
+    const fail_loudly = b.option(bool, "fail-loudly", "crash immediately on unsupported syscall") orelse false;
+    options.addOption(bool, "fail_loudly", fail_loudly);
+
+    // exe.root_module.addOptions("config", options);
+
     // Callers can select an architecture to target
     // It defaults to the host architecture
     const Arch = enum { aarch64, x86_64 };
@@ -59,6 +65,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        // Add config module to enable fail-loudly from core
+        core_module.addOptions("config", options);
 
         const node_lib = b.addLibrary(.{
             .name = "libbvisor",
@@ -70,6 +78,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
+
         node_lib.root_module.addImport("core", core_module);
         node_lib.root_module.addIncludePath(node_api.path("include"));
         node_lib.linker_allow_shlib_undefined = true;
@@ -104,6 +113,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+        // Add config module to enable fail-loudly
+        linux_exe.root_module.addOptions("config", options);
+
         const exe_install = b.addInstallArtifact(linux_exe, .{
             .dest_sub_path = b.fmt("bVisor{s}", .{t.suffix}),
         });

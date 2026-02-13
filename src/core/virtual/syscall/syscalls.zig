@@ -1,5 +1,5 @@
 const std = @import("std");
-const builtin = @import("builtin");
+const config = @import("config");
 const linux = std.os.linux;
 const types = @import("../../types.zig");
 const Supervisor = @import("../../Supervisor.zig");
@@ -173,7 +173,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) linux.
 /// In debug mode, print a message and crash.
 /// In release mode, return ENOSYS.
 fn handleUnsupported(id: u64, syscall: linux.SYS) linux.SECCOMP.notif_resp {
-    if (builtin.mode == .Debug) {
+    if (config.fail_loudly) {
         std.debug.panic("Unsupported syscall: {s}", .{@tagName(syscall)});
     }
     return replyErr(id, .NOSYS);
