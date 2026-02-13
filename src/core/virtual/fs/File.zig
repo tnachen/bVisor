@@ -66,6 +66,13 @@ pub fn setOpenedPath(self: *Self, path: ?[]const u8) !void {
     self.opened_path = if (path) |p| try self.allocator.dupe(u8, p) else null;
 }
 
+pub fn getdents64(self: *Self, buf: []u8, caller: *Thread) !usize {
+    return switch (self.backend) {
+        .proc => |*f| f.getdents64(buf, caller, self.opened_path orelse return error.BADF),
+        else => error.NOSYS, // non-proc backends use kernel FD path in handler
+    };
+}
+
 pub fn read(self: *Self, buf: []u8) !usize {
     switch (self.backend) {
         .passthrough => |*f| return f.read(buf),

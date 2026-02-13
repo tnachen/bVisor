@@ -11,8 +11,12 @@ pub const ProcFile = struct {
     content: [256]u8,
     content_len: usize,
     offset: usize,
+    dirents_offset: usize = 0, // TODO: consider if this is the best way to do this
 
     pub const ProcTarget = union(enum) {
+        dir_proc, // new
+        dir_pid_self, // new
+        dir_pid: NsTgid, // new
         self_nstgid,
         self_status,
         nstgid: NsTgid,
@@ -20,11 +24,14 @@ pub const ProcFile = struct {
     };
 
     pub fn parseProcPath(path: []const u8) !ProcTarget {
-        // path comes in as the full path e.g. "/proc/self" or "/proc/123/status"
+        // new handling... used to consider path as "/proc/self" or "/proc/123/status"
+        // /proc alone (directory listing of all PIDs)
+        if (std.mem.eql(u8, path, "/proc")) return .dir_proc;
+
         const prefix = "/proc/";
         if (!std.mem.startsWith(u8, path, prefix)) return error.NOENT;
         const remainder = path[prefix.len..];
-        if (remainder.len == 0) return error.NOENT;
+        if (remainder.len == 0) return .dir_proc; // TODO: consider what this means
 
         // /proc/self or /proc/self/status
         if (std.mem.startsWith(u8, remainder, "self")) {
@@ -60,6 +67,10 @@ pub const ProcFile = struct {
         };
 
         switch (target) {
+            // TODO: reconsider what's going on here
+            .dir_proc, .dir_pid_self, .dir_pid => {
+                // Directory open — no file content; getdents64 handles listing
+            },
             .self_nstgid => {
                 const leader = try caller.thread_group.getLeader();
                 const nstgid = caller.namespace.getNsTid(leader) orelse return error.NOENT;
@@ -105,6 +116,101 @@ pub const ProcFile = struct {
         const slice = std.fmt.bufPrint(buf, "Name:\t{s}\nPid:\t{d}\nPPid:\t{d}\n", .{ name, nstgid, nsptgid }) catch unreachable;
         return slice.len;
     }
+
+    // ============= FIRST ATTEMPT AT PRODUCING DIRECTORY ENTRIES FOR PROCFILE ======
+    /// Synthesize linux_dirent64 entries for a /proc directory listing.
+    /// `caller` is needed to enumerate visible PIDs from the caller's namespace.
+    /// `opened_path` distinguishes /proc (list PIDs) from /proc/<pid> (list subfiles).
+    pub fn getdents64(self: *ProcFile, buf: []u8, caller: *Thread, opened_path: []const u8) !usize {
+        // Build the full list of entry names into a stack buffer
+        var names_buf: [64][]const u8 = undefined;
+        var num_fmt_buf: [32][16]u8 = undefined; // backing storage for formatted PID strings
+        var name_count: usize = 0;
+
+        // Every directory has . and ..
+        names_buf[name_count] = ".";
+        name_count += 1;
+        names_buf[name_count] = "..";
+        name_count += 1;
+
+        if (std.mem.eql(u8, opened_path, "/proc")) {
+            // List "self" + each visible NsTgid in caller's namespace
+            names_buf[name_count] = "self";
+            name_count += 1;
+
+            var iter = caller.namespace.threads.iterator();
+            while (iter.next()) |entry| {
+                if (name_count >= names_buf.len) break;
+                const nstgid = entry.key_ptr.*;
+                if (nstgid <= 0) continue;
+                const slice = std.fmt.bufPrint(&num_fmt_buf[name_count - 3], "{d}", .{nstgid}) catch continue;
+                names_buf[name_count] = slice;
+                name_count += 1;
+            }
+        } else {
+            // /proc/<pid> or /proc/self — list known subfiles
+            // TODO: expand as more /proc/<pid>/* files are virtualized
+            names_buf[name_count] = "status";
+            name_count += 1;
+        }
+
+        // Serialize entries starting from self.dirents_offset into buf
+        var buf_pos: usize = 0;
+        var entry_idx: usize = 0;
+
+        for (names_buf[0..name_count]) |name| {
+            const name_len = name.len + 1; // include null terminator
+            const rec_len = std.mem.alignForward(usize, @sizeOf(DirentHeader) + name_len, 8);
+
+            // Skip entries we've already returned in previous calls
+            if (entry_idx < self.dirents_offset) {
+                entry_idx += 1;
+                continue;
+            }
+
+            if (buf_pos + rec_len > buf.len) break;
+
+            const d_type: u8 = if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
+                linux.DT.DIR
+            else if (std.mem.eql(u8, name, "self"))
+                linux.DT.LNK
+            else if (std.mem.eql(u8, name, "status"))
+                linux.DT.REG
+            else
+                linux.DT.DIR; // numeric PID entries are directories
+
+            writeDirent(buf[buf_pos..], entry_idx + 1, @intCast(rec_len), d_type, name);
+            buf_pos += rec_len;
+            entry_idx += 1;
+            self.dirents_offset += 1;
+        }
+
+        return buf_pos;
+    }
+
+    const DirentHeader = extern struct {
+        d_ino: u64,
+        d_off: i64,
+        d_reclen: u16,
+        d_type: u8,
+    };
+
+    fn writeDirent(buf: []u8, ino: u64, rec_len: u16, d_type: u8, name: []const u8) void {
+        const header: DirentHeader = .{
+            .d_ino = ino,
+            .d_off = @intCast(ino), // offset cookie, just use sequential index
+            .d_reclen = rec_len,
+            .d_type = d_type,
+        };
+        const header_bytes = std.mem.asBytes(&header);
+        @memcpy(buf[0..header_bytes.len], header_bytes);
+
+        const name_start = @sizeOf(DirentHeader);
+        @memcpy(buf[name_start .. name_start + name.len], name);
+        // Null-terminate and zero-pad to rec_len
+        @memset(buf[name_start + name.len .. rec_len], 0);
+    }
+    // ============^^^^ FIRST ATTEMPT AT PRODUCING DIRECTORY ENTRIES FOR PROCFILE ======
 
     pub fn read(self: *ProcFile, buf: []u8) !usize {
         const remaining = self.content[self.offset..self.content_len];
@@ -216,8 +322,9 @@ test "parseProcPath - /proc/123/status" {
     try testing.expectEqual(ProcFile.ProcTarget{ .nstgid_status = 123 }, target);
 }
 
-test "parseProcPath - /proc/ alone is invalid" {
-    try testing.expectError(error.NOENT, ProcFile.parseProcPath("/proc/"));
+test "parseProcPath - /proc/ resolves to dir_proc" {
+    const target = try ProcFile.parseProcPath("/proc/");
+    try testing.expect(target == .dir_proc);
 }
 
 test "parseProcPath - /proc/self/bogus is invalid" {

@@ -39,6 +39,7 @@ const recvfrom = @import("handlers/recvfrom.zig");
 const sendto = @import("handlers/sendto.zig");
 const sendmsg = @import("handlers/sendmsg.zig");
 const recvmsg = @import("handlers/recvmsg.zig");
+const getdents64 = @import("handlers/getdents64.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -72,6 +73,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .sendto => sendto.handle(notif, supervisor),
         .sendmsg => sendmsg.handle(notif, supervisor),
         .recvmsg => recvmsg.handle(notif, supervisor),
+        .getdents64 => getdents64.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),
@@ -89,7 +91,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
 
         // To implement - files
         .ioctl,
-        .getdents64,
         // To implement - process
         .set_tid_address,
         .execve,
