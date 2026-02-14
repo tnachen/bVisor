@@ -77,18 +77,6 @@ pub fn createObject(env: c.napi_env) !c.napi_value {
     return result;
 }
 
-/// Get up to arg_count arguments from the function. Includes self, if method.
-/// TODO: redundant to unwrap
-pub fn getArgs(env: c.napi_env, info: c.napi_callback_info, comptime arg_count: usize) ![arg_count]c.napi_value {
-    var argc: usize = arg_count;
-    var argv: [arg_count]c.napi_value = undefined;
-    if (c.napi_get_cb_info(env, info, &argc, &argv, null, null) != c.napi_ok) {
-        throw(env, "Failed to get callback info");
-        return error.NapiError;
-    }
-    return argv;
-}
-
 /// Extract a UTF-8 string from a napi_value
 /// Caller owns and must free
 pub fn getStringOwned(allocator: std.mem.Allocator, env: c.napi_env, value: c.napi_value) ![:0]const u8 {
@@ -141,6 +129,32 @@ pub fn registerFunction(
     }
 }
 
+
+/// Get up to arg_count arguments from the callback info
+pub fn getArgs(env: c.napi_env, info: c.napi_callback_info, comptime arg_count: usize) ![arg_count]c.napi_value {
+    var argc: usize = arg_count;
+    var argv: [arg_count]c.napi_value = undefined;
+    if (c.napi_get_cb_info(env, info, &argc, &argv, null, null) != c.napi_ok) {
+        throw(env, "Failed to get callback info");
+        return error.NapiError;
+    }
+    return argv;
+}
+
+/// Extract a *T from a napi_value external
+pub fn getSelf(comptime T: type, env: c.napi_env, value: c.napi_value) !*T {
+    var data: ?*anyopaque = null;
+    if (c.napi_get_value_external(env, value, &data) != c.napi_ok) {
+        throw(env, "Argument must be " ++ @typeName(T));
+        return error.NapiError;
+    }
+    if (data) |ptr| {
+        return @ptrCast(@alignCast(ptr));
+    }
+    throw(env, "Null " ++ @typeName(T) ++ " pointer");
+    return error.NapiError;
+}
+
 /// Generates create/wrap/unwrap/finalize helpers for exposing a Zig type as an N-API external.
 /// All JS-facing values are plain c.napi_value — type discipline lives on the TS side via External<T>.
 pub fn ZigExternal(comptime T: type) type {
@@ -177,33 +191,10 @@ pub fn ZigExternal(comptime T: type) type {
             return result;
         }
 
-        /// Extract the first argument as an external and unwrap it to *T.
+        /// Extract the first argument as an external and unwrap it to *T
         pub fn unwrap(env: c.napi_env, info: c.napi_callback_info) !*T {
-            // TODO: does redundant work to getArgs
-
-            var argc: usize = 1;
-            var argv: [1]c.napi_value = undefined;
-            if (c.napi_get_cb_info(env, info, &argc, &argv, null, null) != c.napi_ok) {
-                throw(env, "Failed to get callback info");
-                return error.NapiError;
-            }
-            if (argc < 1) {
-                throw(env, "Expected " ++ @typeName(T) ++ " argument");
-                return error.NapiError;
-            }
-            var data: ?*anyopaque = null;
-
-            if (c.napi_get_value_external(env, argv[0], &data) != c.napi_ok) {
-                throw(env, "Argument must be " ++ @typeName(T));
-                return error.NapiError;
-            }
-
-            if (data) |ptr| {
-                const self: *T = @ptrCast(@alignCast(ptr));
-                return self;
-            }
-            throw(env, "Null " ++ @typeName(T) ++ " pointer");
-            return error.NapiError;
+            const args = getArgs(env, info, 1) catch return error.NapiError;
+            return getSelf(T, env, args[0]);
         }
     };
 }

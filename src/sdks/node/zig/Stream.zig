@@ -24,8 +24,11 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 
 /// Returns JS type (Uint8array | none)
 pub fn next(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
-    const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
     const allocator = napi.global_allocator;
+
+    // Copy args into native zig types
+    const args = napi.getArgs(env, info, 1) catch return null;
+    const self = napi.getSelf(Self, env, args[0]) catch return null;
 
     const data = self.buffer.read(allocator, self.io) catch |err| {
         std.log.err("streamNext failed: {s}", .{@errorName(err)});

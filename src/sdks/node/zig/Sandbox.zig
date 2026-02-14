@@ -25,13 +25,13 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 // Public API must follow napi interface
 // Returns JS type (RunCmdResult)
 pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
-    const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
-    const io = napi.io;
     const allocator = napi.global_allocator;
+    const io = napi.io;
 
+    // Copy args into native zig types
     const args = napi.getArgs(env, info, 2) catch return null;
-    const cmd_arg = args[1];
-    const cmd = napi.getStringOwned(allocator, env, cmd_arg) catch return null;
+    const self = napi.getSelf(Self, env, args[0]) catch return null;
+    const cmd = napi.getStringOwned(allocator, env, args[1]) catch return null;
     defer allocator.free(cmd);
 
     // Allocate stdout and stderr buffers for this run, owned by node
