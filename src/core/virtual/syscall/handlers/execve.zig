@@ -71,7 +71,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
                     if (supervisor.overlay.cowExists(h.normalized)) {
                         // guest's presumed path maps to a COW copy
                         // unfortunately, we can't support this because the kernel path is almost certainly
-                        // longer than the guest's speciified path, so we can't overwrite it
+                        // longer than the guest's specified path, so we can't overwrite it
                         // For now, we reply error PERM
                         logger.log("execve: the specified executable at path cannot be executed because its sandboxed path cannot be overwritten in guest memory", .{});
                         // TODO: figure out how to support this
@@ -82,7 +82,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
                 },
                 .tmp => {
                     // guest's presumed path maps to a TMP file
-                    // unfortunately, we can't supprt this either, for the same reasons as above.
+                    // unfortunately, we can't support this either, for the same reasons as above.
                     // For now, we reply error PERM
                     logger.log("execve: the specified executable at path cannot be executed because its sandboxed path cannot be overwritten in guest memory", .{});
                     return LinuxErr.PERM;
