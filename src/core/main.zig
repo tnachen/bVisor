@@ -60,31 +60,21 @@ test {
     _ = @import("virtual/fs/backend/passthrough.zig");
 }
 
-fn runBash() void {
-    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "echo hello world" };
-    const envp = [_:null]?[*:0]const u8{};
-    _ = linux.execve("/bin/sh", &argv, &envp);
-    linux.exit_group(1); // only reached if execve fails
-}
+const DEFAULT_CMD = "echo hello world";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
     const logger = Logger.init(.prefork);
-    logger.log("Running bash via execve:", .{});
-
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
+    logger.log("Running bash via execve: {s}", .{DEFAULT_CMD});
 
     var stdout = LogBuffer.init(allocator);
     var stderr = LogBuffer.init(allocator);
     defer stdout.deinit();
     defer stderr.deinit();
 
-    try execute(allocator, io, setup.generateUid(io), runBash, &stdout, &stderr);
+    try execute(allocator, io, setup.generateUid(io), DEFAULT_CMD, &stdout, &stderr);
     try stdout.flush(io, File.stdout());
     try stderr.flush(io, File.stderr());
 }

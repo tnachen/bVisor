@@ -27,19 +27,25 @@ pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
 pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
     const self = napi.ZigExternal(Self).unwrap(env, info) catch return null;
     const io = napi.io;
+    const allocator = napi.global_allocator;
+
+    const args = napi.getArgs(env, info, 2) catch return null;
+    const cmd_arg = args[1];
+    const cmd = napi.getStringOwned(allocator, env, cmd_arg) catch return null;
+    defer allocator.free(cmd);
 
     // Allocate stdout and stderr buffers for this run, owned by node
-    var stdout_stream: ?*Stream = Stream.init(napi.allocator, io) catch return null;
-    errdefer if (stdout_stream) |s| s.deinit(napi.allocator);
-    var stderr_stream: ?*Stream = Stream.init(napi.allocator, io) catch return null;
-    errdefer if (stderr_stream) |s| s.deinit(napi.allocator);
+    var stdout_stream: ?*Stream = Stream.init(allocator, io) catch return null;
+    errdefer if (stdout_stream) |s| s.deinit(allocator);
+    var stderr_stream: ?*Stream = Stream.init(allocator, io) catch return null;
+    errdefer if (stderr_stream) |s| s.deinit(allocator);
 
     // Run in seccomp — fills the LogBuffers inside stdout/stderr Streams
     core.execute(
-        napi.allocator,
+        allocator,
         io,
         self.uid,
-        core.smokeTest,
+        cmd,
         &stdout_stream.?.buffer,
         &stderr_stream.?.buffer,
     ) catch |err| {
