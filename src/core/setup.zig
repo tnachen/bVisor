@@ -12,6 +12,8 @@ const pidfd = @import("utils/pidfd.zig");
 const lookupGuestFd = pidfd.lookupGuestFdWithRetry;
 
 pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, stdout: *LogBuffer, stderr: *LogBuffer) !void {
+    const start_time = Io.Clock.awake.now(io);
+
     // Probe the next available FD: dup gives the lowest free FD, then close it.
     // After fork, seccomp.install() in the child will allocate the same FD number.
     // This will race with other noise in the env, and is a temp solution
@@ -27,7 +29,16 @@ pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, std
         try guestProcess(cmd, expected_notify_fd);
     } else {
         const init_guest_tid: linux.pid_t = fork_result;
-        try supervisorProcess(allocator, io, uid, init_guest_tid, expected_notify_fd, stdout, stderr);
+        try supervisorProcess(
+            allocator,
+            io,
+            uid,
+            start_time,
+            init_guest_tid,
+            expected_notify_fd,
+            stdout,
+            stderr,
+        );
     }
 }
 
@@ -48,7 +59,16 @@ fn guestProcess(cmd: [:0]const u8, expected_notify_fd: linux.fd_t) !void {
     linux.exit_group(1); // only reached if execve fails
 }
 
-fn supervisorProcess(allocator: Allocator, io: Io, uid: [16]u8, init_guest_tid: linux.pid_t, expected_notify_fd: linux.fd_t, stdout: *LogBuffer, stderr: *LogBuffer) !void {
+fn supervisorProcess(
+    allocator: Allocator,
+    io: Io,
+    uid: [16]u8,
+    start_time: Io.Timestamp,
+    init_guest_tid: linux.pid_t,
+    expected_notify_fd: linux.fd_t,
+    stdout: *LogBuffer,
+    stderr: *LogBuffer,
+) !void {
     const logger = Logger.init(.supervisor);
     logger.log("Supervisor process starting", .{});
     defer logger.log("Supervisor process exiting", .{});
@@ -57,6 +77,9 @@ fn supervisorProcess(allocator: Allocator, io: Io, uid: [16]u8, init_guest_tid: 
 
     var supervisor = try Supervisor.init(allocator, io, uid, notify_fd, init_guest_tid, stdout, stderr);
     defer supervisor.deinit();
+    const now = Io.Clock.awake.now(io);
+    const duration = now.durationTo(start_time);
+    logger.log("Supervisor process  {d}ms", .{duration.toMilliseconds()});
     try supervisor.run();
 }
 
