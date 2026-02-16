@@ -30,7 +30,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         defer supervisor.mutex.unlock(supervisor.io);
 
         const caller = try supervisor.guest_threads.get(caller_tid);
-        
+
         file = caller.fd_table.get_ref(fd) orelse {
             logger.log("close: EBADF for fd={d}", .{fd});
             return LinuxErr.BADF;
