@@ -57,6 +57,7 @@ test {
     _ = @import("virtual/syscall/handlers/execve.zig");
     _ = @import("virtual/syscall/e2e_test.zig");
     _ = @import("virtual/OverlayRoot.zig");
+    _ = @import("virtual/Symlinks.zig");
     _ = @import("virtual/fs/backend/passthrough.zig");
 }
 

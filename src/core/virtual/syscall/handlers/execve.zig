@@ -6,21 +6,16 @@ const AbsTid = Thread.AbsTid;
 const path_router = @import("../../path.zig");
 const resolveAndRoute = path_router.resolveAndRoute;
 const Supervisor = @import("../../../Supervisor.zig");
+const Symlinks = @import("../../Symlinks.zig");
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
-    // Handling execve is tricky because, similar to clone, it must be called by the guest process
-    // IE supervisor can't call it on guest's behalf
-
-    // To direct the exec to happen on the correct sandboxed file, we must overwrite the
-    // path directly in the guest process's memory, before a replyContinue
-
-    // TODO: since sandbox filesystem lives at /tmp/.bvisor/ ..., it's more likely than not
-    // that a specified path like /usr/bin would be LONGER in the sandbox than the guest process
-    // has available; we can't write longer paths into guest memory, only shorter
-    // We need a way to figure out how to handle this.
-    // For now, any file that's not at its specified location, IE COW or TMP files, will error.PERM
+    // Handling execve is tricky. Similarly to clone, must be called by guest process.
+    // To redirect exec to a sandboxed file, we overwrite the path in guest memory before replyContinue.
+    // Sandboxed filesystem lives at `/tmp/.bvisor/ ...`.
+    // For COW/TMP files, the real overlay path is longer than the guest's buffer, so we create
+    // a short symlink in /tmp that points to the overlay path and write that into guest memory
 
     const logger = supervisor.logger;
     const caller_tid: AbsTid = @intCast(notif.pid);
@@ -63,34 +58,50 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
                     return LinuxErr.ACCES;
                 },
                 .passthrough => {
-                    // guest's presumed path maps directly to the actual kernel path
+                    // Guest's presumed path maps directly to the actual kernel path
                     logger.log("execve: passthrough {s}", .{h.normalized});
                     return replyContinue(notif.id);
                 },
                 .cow => {
+                    // If guest's presumed path maps to a COW copy:
                     if (supervisor.overlay.cowExists(h.normalized)) {
-                        // guest's presumed path maps to a COW copy
-                        // unfortunately, we can't support this because the kernel path is almost certainly
-                        // longer than the guest's specified path, so we can't overwrite it
-                        // For now, we reply error PERM
-                        logger.log("execve: the specified executable at path cannot be executed because its sandboxed path cannot be overwritten in guest memory", .{});
-                        // TODO: figure out how to support this
-                        return LinuxErr.PERM;
+                        var cow_path_buf: [512]u8 = undefined;
+                        const cow_path = try supervisor.overlay.resolveCow(h.normalized, &cow_path_buf);
+                        return execViaSymlink(supervisor, notif.id, cow_path, path.len, caller_tid, path_ptr);
                     }
-                    // guest's presumed path maps to the actual kernel path, as it hasn't been written to yet
+                    // No COW copy exists; the original kernel path is correct
                     return replyContinue(notif.id);
                 },
                 .tmp => {
-                    // guest's presumed path maps to a TMP file
-                    // unfortunately, we can't support this either, for the same reasons as above.
-                    // For now, we reply error PERM
-                    logger.log("execve: the specified executable at path cannot be executed because its sandboxed path cannot be overwritten in guest memory", .{});
-                    return LinuxErr.PERM;
-                    // TODO: figure out how to support this
+                    var tmp_path_buf: [512]u8 = undefined;
+                    const tmp_path = try supervisor.overlay.resolveTmp(h.normalized, &tmp_path_buf);
+                    return execViaSymlink(supervisor, notif.id, tmp_path, path.len, caller_tid, path_ptr);
                 },
             }
         },
     }
+}
+
+/// Create a short symlink pointing to `kernel_path`, write it into the guest's memory, and replyContinue.
+fn execViaSymlink(
+    supervisor: *Supervisor,
+    notif_id: u64,
+    kernel_path: []const u8,
+    original_path_len: usize,
+    caller_tid: AbsTid,
+    path_ptr: u64,
+) !linux.SECCOMP.notif_resp {
+    const logger = supervisor.logger;
+
+    var symlink_buf: [Symlinks.max_path_len + 1]u8 = undefined;
+    const symlink_path = supervisor.symlinks.create(kernel_path, original_path_len, &symlink_buf) catch |err| {
+        logger.log("execve: symlink creation failed: {s}", .{@errorName(err)});
+        return LinuxErr.PERM;
+    };
+
+    logger.log("execve: symlink {s} -> {s}", .{ symlink_path, kernel_path });
+    try memory_bridge.writeString(symlink_path, caller_tid, path_ptr);
+    return replyContinue(notif_id);
 }
 
 const testing = std.testing;
