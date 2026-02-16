@@ -142,7 +142,14 @@ bVisor is written in Zig. Zig is pre-1.0, so compilation is only guaranteed with
 bVisor depends on Linux kernel features, although it's developed primarily on ARM Macs. Zig cross-compiles to Linux, and all tests run in Docker.
 
 ```bash
-zig build        # Cross-compile for all targets (exe, tests, N-API .node binaries)
-zig build test   # Unit tests in Docker container
-zig build run    # E2E smoke test in Docker (scorecard of supported syscalls)
+zig build           # Cross-compile for all targets (exe, tests, N-API .node binaries)
+zig build test      # Unit tests in Docker container
+zig build run       # E2E smoke test in Docker (scorecard of supported syscalls)
+zig build run-node  # Run E2E node SDK tests with current zig core build
+```
+
+`run` and `run-node` support the `-Dfail-loudly` cli flag, to crash on unsupported syscall.
+```bash
+zig build run -Dfail-loudly
+zig build run-node -Dfail-loudly
 ```
