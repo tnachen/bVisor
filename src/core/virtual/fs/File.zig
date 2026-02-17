@@ -186,12 +186,15 @@ pub fn statxToStat(sx: linux.Statx) Stat {
     return st;
 }
 pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
-    switch (self.backend) {
-        .passthrough => |*f| return f.lseek(offset, whence),
-        .cow => |*f| return f.lseek(offset, whence),
-        .tmp => |*f| return f.lseek(offset, whence),
-        .proc => |*f| return f.lseek(offset, whence),
-    }
+    const result = switch (self.backend) {
+        .passthrough => |*f| f.lseek(offset, whence),
+        .cow => |*f| f.lseek(offset, whence),
+        .tmp => |*f| f.lseek(offset, whence),
+        .proc => |*f| f.lseek(offset, whence),
+    };
+    const pos = try result;
+    if (pos == 0) self.dirents_offset = 0;
+    return pos;
 }
 
 pub fn ioctl(self: *Self, request: linux.IOCTL.Request, arg: usize) !usize {

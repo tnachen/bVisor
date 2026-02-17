@@ -135,6 +135,7 @@ pub const Cow = union(enum) {
     /// Merged directory listing for COW directories.
     /// Reads entries from the kernel, adds overlay-only entries, filters tombstones.
     /// When dir_path is null, falls back to simple kernel forwarding.
+    /// TODO: Could be more parsimonious with the mutex lock on this entire method.
     pub fn getdents64(
         self: *Cow,
         buf: []u8,
@@ -193,7 +194,7 @@ pub const Cow = union(enum) {
             var overlay_buf: [4096]u8 = undefined;
             while (entry_count < MAX_DIR_ENTRIES and name_pos < MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
-                if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+                try checkErr(rc, "cow.getdents64 overlay read", .{});
                 const prev_count = entry_count;
                 collectDirentsDedup(
                     overlay_buf[0..rc],
