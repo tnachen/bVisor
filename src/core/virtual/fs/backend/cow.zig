@@ -158,22 +158,26 @@ pub const Cow = union(enum) {
 
         var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
         var name_pos: usize = 0;
-        var truncated = false;
 
         var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
         var entry_count: usize = 0;
 
-        // Reset kernel FD's offset so we always read the full directory
-        _ = linux.lseek(fd, 0, linux.SEEK.SET);
+        // Open the real directory on the host filesystem for base entries.
+        // We can't use the backing fd here because writecopy fds point to
+        // the overlay, not the real path.
+        const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
+            logger.log("cow.getdents64: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
+            return 0;
+        };
+        defer _ = linux.close(real_fd);
 
-        // Read all kernel directory entries
+        // Read all kernel directory entries from the real path
         {
             var kernel_buf: [4096]u8 = undefined;
             while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
-                const rc = linux.getdents64(fd, &kernel_buf, kernel_buf.len);
+                const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
                 try checkErr(rc, "cow.getdents64 kernel read", .{});
                 if (rc == 0) break;
-                const prev_count = entry_count;
                 dirent.collectDirents(
                     kernel_buf[0..rc],
                     &entries,
@@ -181,10 +185,6 @@ pub const Cow = union(enum) {
                     &name_storage,
                     &name_pos,
                 );
-                if (entry_count == prev_count and rc > 0) {
-                    truncated = true;
-                    break;
-                }
             }
         }
 
@@ -196,7 +196,6 @@ pub const Cow = union(enum) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
                 try checkErr(rc, "cow.getdents64 overlay read", .{});
                 if (rc == 0) break;
-                const prev_count = entry_count;
                 dirent.collectDirentsDedup(
                     overlay_buf[0..rc],
                     &entries,
@@ -204,15 +203,13 @@ pub const Cow = union(enum) {
                     &name_storage,
                     &name_pos,
                 );
-                if (entry_count == prev_count) {
-                    truncated = true;
-                    break;
-                }
             }
         }
 
-        if (truncated) {
-            logger.log("cow.getdents64: directory listing truncated for {s} (entries={d}, name_bytes={d})", .{ path, entry_count, name_pos });
+        if (entry_count >= dirent.MAX_DIR_ENTRIES or name_pos >= dirent.MAX_NAME_STORAGE) {
+            logger.log("cow.getdents64: capacity exceeded for {s} (entries={d}/{d}, name_bytes={d}/{d})", .{
+                path, entry_count, dirent.MAX_DIR_ENTRIES, name_pos, dirent.MAX_NAME_STORAGE,
+            });
         }
 
         return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
