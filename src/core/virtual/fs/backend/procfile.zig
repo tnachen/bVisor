@@ -83,11 +83,6 @@ pub const ProcFile = struct {
         return self;
     }
 
-    fn formatPid(buf: *[256]u8, nstgid: i32) usize {
-        const slice = std.fmt.bufPrint(buf, "{d}\n", .{nstgid}) catch unreachable;
-        return slice.len;
-    }
-
     fn formatStatus(buf: *[256]u8, target: *Thread) !usize {
         const leader = try target.thread_group.getLeader();
         const nstgid = target.namespace.getNsTid(leader) orelse 0;
