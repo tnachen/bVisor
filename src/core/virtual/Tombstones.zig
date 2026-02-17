@@ -27,6 +27,7 @@ pub fn deinit(self: *Self) void {
 pub fn add(self: *Self, path: []const u8, kind: Kind) !void {
     const gop = try self.map.getOrPut(self.allocator, path);
     if (!gop.found_existing) {
+        errdefer _ = self.map.remove(path);
         gop.key_ptr.* = try self.allocator.dupe(u8, path);
     }
     gop.value_ptr.* = kind;

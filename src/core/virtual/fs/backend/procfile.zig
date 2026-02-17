@@ -117,13 +117,15 @@ pub const ProcFile = struct {
             name_count += 1;
 
             var iter = caller.namespace.threads.iterator();
+            var pid_idx: usize = 0;
             while (iter.next()) |entry| {
-                if (name_count >= names_buf.len) break;
+                if (name_count >= names_buf.len or pid_idx >= num_fmt_buf.len) break;
                 const nstgid = entry.key_ptr.*;
                 if (nstgid <= 0) continue;
-                const slice = std.fmt.bufPrint(&num_fmt_buf[name_count - 3], "{d}", .{nstgid}) catch continue;
+                const slice = std.fmt.bufPrint(&num_fmt_buf[pid_idx], "{d}", .{nstgid}) catch continue;
                 names_buf[name_count] = slice;
                 name_count += 1;
+                pid_idx += 1;
             }
         } else {
             // /proc/<pid> or /proc/self — list known subfiles
