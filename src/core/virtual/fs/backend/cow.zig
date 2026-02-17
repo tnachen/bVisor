@@ -4,6 +4,7 @@ const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
 const Tombstones = @import("../../Tombstones.zig");
 const dirent = @import("../dirent.zig");
+const Logger = @import("../../../types.zig").Logger;
 
 const BackingFD = linux.fd_t;
 
@@ -152,23 +153,26 @@ pub const Cow = union(enum) {
             return rc;
         };
 
-        var name_storage: [4096]u8 = undefined;
-        var name_pos: usize = 0;
+        const logger = Logger.init(.supervisor);
 
-        // Cumulative list of entries
+        var name_storage: [MAX_NAME_STORAGE]u8 = undefined;
+        var name_pos: usize = 0;
+        var truncated = false;
+
         var entries: [MAX_DIR_ENTRIES]DirEntry = undefined;
         var entry_count: usize = 0;
 
         // Reset kernel FD's offset so we always read the full directory
         _ = linux.lseek(fd, 0, linux.SEEK.SET);
 
-        // Read all kernel directory entries, ignoring any beyond MAX_DIR_ENTRIES
+        // Read all kernel directory entries
         {
             var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < MAX_DIR_ENTRIES) {
+            while (entry_count < MAX_DIR_ENTRIES and name_pos < MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(fd, &kernel_buf, kernel_buf.len);
                 try checkErr(rc, "cow.getdents64 kernel read", .{});
                 if (rc == 0) break;
+                const prev_count = entry_count;
                 collectDirents(
                     kernel_buf[0..rc],
                     &entries,
@@ -176,6 +180,10 @@ pub const Cow = union(enum) {
                     &name_storage,
                     &name_pos,
                 );
+                if (entry_count == prev_count and rc > 0) {
+                    truncated = true;
+                    break;
+                }
             }
         }
 
@@ -183,9 +191,10 @@ pub const Cow = union(enum) {
         if (openOverlayDir(overlay, path)) |overlay_fd| {
             defer _ = linux.close(overlay_fd);
             var overlay_buf: [4096]u8 = undefined;
-            while (entry_count < MAX_DIR_ENTRIES) {
+            while (entry_count < MAX_DIR_ENTRIES and name_pos < MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
                 if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+                const prev_count = entry_count;
                 collectDirentsDedup(
                     overlay_buf[0..rc],
                     &entries,
@@ -193,7 +202,15 @@ pub const Cow = union(enum) {
                     &name_storage,
                     &name_pos,
                 );
+                if (entry_count == prev_count and rc > 0) {
+                    truncated = true;
+                    break;
+                }
             }
+        }
+
+        if (truncated) {
+            logger.log("cow.getdents64: directory listing truncated for {s} (entries={d}, name_bytes={d})", .{ path, entry_count, name_pos });
         }
 
         // Serialize entries, skipping already-returned and tombstoned ones
@@ -220,6 +237,7 @@ pub const Cow = union(enum) {
             dirent.writeDirent(
                 buf[buf_pos..],
                 entry_idx + 1,
+                @intCast(entry_idx + 1),
                 @intCast(rec_len),
                 entry.d_type,
                 entry.name,
@@ -264,7 +282,8 @@ pub const Cow = union(enum) {
     }
 };
 
-const MAX_DIR_ENTRIES = 256;
+const MAX_DIR_ENTRIES = 2048;
+const MAX_NAME_STORAGE = 32768;
 
 const DirEntry = struct {
     name: []const u8, // points into name_storage
@@ -276,7 +295,7 @@ fn collectDirents(
     raw: []const u8,
     entries: []DirEntry,
     count: *usize,
-    name_storage: *[4096]u8,
+    name_storage: *[MAX_NAME_STORAGE]u8,
     name_pos: *usize,
 ) void {
     var pos: usize = 0;
@@ -309,7 +328,7 @@ fn collectDirentsDedup(
     raw: []const u8,
     entries: []DirEntry,
     count: *usize,
-    name_storage: *[4096]u8,
+    name_storage: *[MAX_NAME_STORAGE]u8,
     name_pos: *usize,
 ) void {
     var pos: usize = 0;

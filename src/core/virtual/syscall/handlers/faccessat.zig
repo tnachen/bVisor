@@ -73,8 +73,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             return LinuxErr.ACCES;
         },
         .handle => |h| {
-            // Check tombstones for COW/tmp paths
+            // Check tombstones for COW/tmp paths (lock protects concurrent access)
             if (h.backend == .cow or h.backend == .tmp) {
+                supervisor.mutex.lockUncancelable(supervisor.io);
+                defer supervisor.mutex.unlock(supervisor.io);
                 if (supervisor.tombstones.isTombstoned(h.normalized)) {
                     return LinuxErr.NOENT;
                 }

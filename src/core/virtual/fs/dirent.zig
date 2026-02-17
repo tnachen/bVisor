@@ -9,9 +9,10 @@ pub fn recLen(name_len: usize) usize {
 }
 
 /// Write a linux_dirent64 entry into `buf` using field-by-field serialization.
-pub fn writeDirent(buf: []u8, ino: u64, rec_len: u16, d_type: u8, name: []const u8) void {
+/// `d_off` is the opaque cookie for lseek(fd, d_off, SEEK_SET) to resume at the next entry.
+pub fn writeDirent(buf: []u8, ino: u64, d_off: i64, rec_len: u16, d_type: u8, name: []const u8) void {
     std.mem.writeInt(u64, buf[0..8], ino, .little);
-    std.mem.writeInt(i64, buf[8..16], @intCast(ino), .little);
+    std.mem.writeInt(i64, buf[8..16], d_off, .little);
     std.mem.writeInt(u16, buf[16..18], rec_len, .little);
     buf[18] = d_type;
     @memcpy(buf[NAME_OFFSET..][0..name.len], name);

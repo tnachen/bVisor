@@ -83,7 +83,7 @@ fn makeCloseNotif(tid: AbsTid, vfd: i32) linux.SECCOMP.notif {
     });
 }
 
-test "open proc -> read -> close returns NsTid" {
+test "open proc -> read -> close returns status content" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
     var stdout_buf = LogBuffer.init(allocator);
@@ -93,21 +93,22 @@ test "open proc -> read -> close returns NsTid" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    // Open /proc/self
+    // Open /proc/self/status (a regular file)
     const open_resp = try openat_handler(
-        makeOpenatNotif(init_tid, "/proc/self", 0, 0),
+        makeOpenatNotif(init_tid, "/proc/self/status", 0, 0),
         &supervisor,
     );
     const vfd: i32 = @intCast(open_resp.val);
     try testing.expect(vfd >= 3);
 
     // Read
-    var buf: [64]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const read_resp = try read_handler(
         makeReadNotif(init_tid, vfd, &buf, buf.len),
         &supervisor,
     );
-    try testing.expectEqualStrings("100\n", buf[0..@intCast(read_resp.val)]);
+    const content = buf[0..@intCast(read_resp.val)];
+    try testing.expect(std.mem.indexOf(u8, content, "Pid:\t100\n") != null);
 
     // Close
     _ = try close_handler(
@@ -180,9 +181,9 @@ test "three files open simultaneously, each returns correct data" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    // Open a proc file
+    // Open a proc file (status is a regular file)
     const proc_resp = try openat_handler(
-        makeOpenatNotif(init_tid, "/proc/self", 0, 0),
+        makeOpenatNotif(init_tid, "/proc/self/status", 0, 0),
         &supervisor,
     );
     const proc_vfd: i32 = @intCast(proc_resp.val);
@@ -208,12 +209,13 @@ test "three files open simultaneously, each returns correct data" {
     try testing.expect(devnull_vfd != tmp_vfd);
 
     // Read from proc file
-    var buf: [64]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const proc_read = try read_handler(
         makeReadNotif(init_tid, proc_vfd, &buf, buf.len),
         &supervisor,
     );
-    try testing.expectEqualStrings("100\n", buf[0..@intCast(proc_read.val)]);
+    const content = buf[0..@intCast(proc_read.val)];
+    try testing.expect(std.mem.indexOf(u8, content, "Pid:\t100\n") != null);
 
     // Read from /dev/null - should return 0 (EOF)
     const devnull_read = try read_handler(
@@ -240,7 +242,7 @@ test "close one of three, other two remain accessible, closed one EBADF" {
 
     // Open three files
     const vfd1: i32 = @intCast((try openat_handler(
-        makeOpenatNotif(init_tid, "/proc/self", 0, 0),
+        makeOpenatNotif(init_tid, "/proc/self/status", 0, 0),
         &supervisor,
     )).val);
     const vfd2: i32 = @intCast((try openat_handler(
@@ -391,7 +393,7 @@ test "non-CLONE_FILES fork - independent tables, parent close doesnt affect chil
     try testing.expect(child_ref2 != null);
 }
 
-test "child namespace reads /proc/self -> sees NsTid 1" {
+test "child namespace reads /proc/self/status -> sees NsTid 1" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
     var stdout_buf = LogBuffer.init(allocator);
@@ -408,21 +410,22 @@ test "child namespace reads /proc/self -> sees NsTid 1" {
     try proc_info.mock.setupNsTids(allocator, 200, &nstids);
     _ = try supervisor.guest_threads.registerChild(parent, 200, CloneFlags.from(linux.CLONE.NEWPID));
 
-    // Child opens /proc/self
+    // Child opens /proc/self/status
     const open_resp = try openat_handler(
-        makeOpenatNotif(200, "/proc/self", 0, 0),
+        makeOpenatNotif(200, "/proc/self/status", 0, 0),
         &supervisor,
     );
 
     const vfd: i32 = @intCast(open_resp.val);
 
     // Read should show NsTid 1 (child's view)
-    var buf: [64]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const read_resp = try read_handler(
         makeReadNotif(200, vfd, &buf, buf.len),
         &supervisor,
     );
-    try testing.expectEqualStrings("1\n", buf[0..@intCast(read_resp.val)]);
+    const content = buf[0..@intCast(read_resp.val)];
+    try testing.expect(std.mem.indexOf(u8, content, "Pid:\t1\n") != null);
 
     _ = try close_handler(makeCloseNotif(200, vfd), &supervisor);
 }
@@ -569,12 +572,11 @@ test "fstat on proc file writes correct struct stat" {
     );
     try testing.expectEqual(@as(i64, 0), fstat_resp.val);
 
-    // ProcFile.statx sets: mode = S.IFREG | 0o444, nlink = 1, blksize = 4096, size = content_len
-    // Content of /proc/self for tid 100 is "100\n" (4 bytes)
-    try testing.expectEqual(linux.S.IFREG | 0o444, stat_buf.st_mode);
-    try testing.expectEqual(@as(@TypeOf(stat_buf.st_nlink), 1), stat_buf.st_nlink);
+    // /proc/self is a directory: mode = S.IFDIR | 0o555, nlink = 2
+    try testing.expectEqual(linux.S.IFDIR | 0o555, stat_buf.st_mode);
+    try testing.expectEqual(@as(@TypeOf(stat_buf.st_nlink), 2), stat_buf.st_nlink);
     try testing.expectEqual(@as(@TypeOf(stat_buf.st_blksize), 4096), stat_buf.st_blksize);
-    try testing.expectEqual(@as(i64, 4), stat_buf.st_size);
+    try testing.expectEqual(@as(i64, 0), stat_buf.st_size);
 
     _ = try close_handler(makeCloseNotif(init_tid, vfd), &supervisor);
 }

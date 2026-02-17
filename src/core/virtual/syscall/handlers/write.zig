@@ -257,7 +257,7 @@ test "write to read-only backend (proc) returns EROFS" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var data = "test".*;

@@ -85,8 +85,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
             const mode: linux.mode_t = @truncate(notif.data.arg3);
 
-            // Check tombstones for COW/tmp paths
+            // Check tombstones for COW/tmp paths (lock protects concurrent access)
             if (h.backend == .cow or h.backend == .tmp) {
+                supervisor.mutex.lockUncancelable(supervisor.io);
+                defer supervisor.mutex.unlock(supervisor.io);
                 if (supervisor.tombstones.isTombstoned(h.normalized)) {
                     if (flags.CREAT) {
                         supervisor.tombstones.remove(h.normalized);

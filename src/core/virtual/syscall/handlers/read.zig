@@ -83,7 +83,7 @@ test "read from virtual file returns data" {
 
     // Insert a proc file into the fd table (content "100\n")
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Create a buffer for the result
@@ -97,7 +97,8 @@ test "read from virtual file returns data" {
 
     const resp = try handle(notif, &supervisor);
     try testing.expect(resp.val > 0);
-    try testing.expectEqualStrings("100\n", result_buf[0..@intCast(resp.val)]);
+    const content = result_buf[0..@intCast(resp.val)];
+    try testing.expect(std.mem.startsWith(u8, content, "Name:\tbvisor-guest\n"));
 }
 
 test "read count=5 from larger file returns at most 5 bytes" {
@@ -111,7 +112,7 @@ test "read count=5 from larger file returns at most 5 bytes" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var result_buf: [64]u8 = undefined;
@@ -159,7 +160,7 @@ test "read count=0 returns 0" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var result_buf: [64]u8 = undefined;

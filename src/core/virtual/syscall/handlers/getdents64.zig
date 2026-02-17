@@ -42,11 +42,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     var stack_buf: [max_len]u8 = undefined;
     const capped_count = @min(count, max_len);
 
-    // Proc backend needs mutex held during getdents64 (iterates namespace threads)
-    const n: usize = if (file.backend == .proc) blk: {
+    // Mutex protects namespace threads (proc) and tombstones (cow/tmp)
+    const n: usize = if (file.backend == .proc or file.backend == .cow) blk: {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
-        const caller = try supervisor.guest_threads.get(caller_tid);
+        const caller = if (file.backend == .proc) try supervisor.guest_threads.get(caller_tid) else null;
         break :blk try file.getdents64(stack_buf[0..capped_count], caller, &supervisor.overlay, &supervisor.tombstones);
     } else try file.getdents64(stack_buf[0..capped_count], null, &supervisor.overlay, &supervisor.tombstones);
 
