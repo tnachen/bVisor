@@ -1,6 +1,6 @@
 {
   "name": "bvisor",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "build:zig": "cd ../../.. && zig build",
+    "build:zig": "cd ../../.. && zig build -Doptimize=ReleaseSafe",
     "prepublishOnly": "npm run build",
     "test:published": "docker run --rm -v ./test.ts:/test.ts:ro oven/bun:alpine sh -c 'cd /tmp && echo {} > package.json && bun add bvisor && cp /test.ts . && bun test.ts'",
     "version:patch": "npm version patch --workspaces --no-git-tag-version --force && npm version patch --no-git-tag-version --force",
