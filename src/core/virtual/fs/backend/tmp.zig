@@ -2,6 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
+const Tombstones = @import("../../Tombstones.zig");
+const dirent = @import("../dirent.zig");
 
 const builtin = @import("builtin");
 
@@ -91,10 +93,47 @@ pub const Tmp = struct {
         return @intCast(rc);
     }
 
-    pub fn getdents64(self: *Tmp, buf: []u8) !usize {
-        const rc = linux.getdents64(self.fd, buf.ptr, buf.len);
-        try checkErr(rc, "tmp.getdents64", .{});
-        return rc;
+    pub fn getdents64(
+        self: *Tmp,
+        buf: []u8,
+        dir_path: ?[]const u8,
+        dirents_offset: *usize,
+        tombstones: *const Tombstones,
+    ) !usize {
+        const path = dir_path orelse {
+            const rc = linux.getdents64(self.fd, buf.ptr, buf.len);
+            try checkErr(rc, "tmp.getdents64", .{});
+            return rc;
+        };
+
+        // Reset kernel FD's offset so we always read the full directory
+        _ = linux.lseek(self.fd, 0, linux.SEEK.SET);
+
+        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
+        var entry_count: usize = 0;
+        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
+        var name_pos: usize = 0;
+
+        // Read all kernel directory entries
+        {
+            var kernel_buf: [4096]u8 = undefined;
+            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
+                const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
+                try checkErr(rc, "tmp.getdents64 kernel read", .{});
+                if (rc == 0) break;
+                const prev_count = entry_count;
+                dirent.collectDirents(
+                    kernel_buf[0..rc],
+                    &entries,
+                    &entry_count,
+                    &name_storage,
+                    &name_pos,
+                );
+                if (entry_count == prev_count and rc > 0) break;
+            }
+        }
+
+        return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
     }
 
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {

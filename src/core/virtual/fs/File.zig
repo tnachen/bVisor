@@ -128,7 +128,7 @@ pub fn statxByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []con
 pub fn getdents64(self: *Self, buf: []u8, caller: ?*Thread, overlay: *OverlayRoot, tombstones: *const Tombstones) !usize {
     switch (self.backend) {
         .passthrough => |*f| return f.getdents64(buf),
-        .tmp => |*f| return f.getdents64(buf),
+        .tmp => |*f| return f.getdents64(buf, self.opened_path, &self.dirents_offset, tombstones),
         .cow => |*f| return f.getdents64(buf, self.opened_path, &self.dirents_offset, overlay, tombstones),
         .proc => |*f| return f.getdents64(buf, caller.?, self.opened_path orelse return error.BADF, &self.dirents_offset),
     }

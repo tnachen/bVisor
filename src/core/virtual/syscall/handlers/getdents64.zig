@@ -43,7 +43,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const capped_count = @min(count, max_len);
 
     // Mutex protects namespace threads (proc) and tombstones (cow/tmp)
-    const n: usize = if (file.backend == .proc or file.backend == .cow) blk: {
+    const n: usize = if (file.backend == .proc or file.backend == .cow or file.backend == .tmp) blk: {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
         const caller = if (file.backend == .proc) try supervisor.guest_threads.get(caller_tid) else null;

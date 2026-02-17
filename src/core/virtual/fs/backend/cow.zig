@@ -156,11 +156,11 @@ pub const Cow = union(enum) {
 
         const logger = Logger.init(.supervisor);
 
-        var name_storage: [MAX_NAME_STORAGE]u8 = undefined;
+        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
         var name_pos: usize = 0;
         var truncated = false;
 
-        var entries: [MAX_DIR_ENTRIES]DirEntry = undefined;
+        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
         var entry_count: usize = 0;
 
         // Reset kernel FD's offset so we always read the full directory
@@ -169,12 +169,12 @@ pub const Cow = union(enum) {
         // Read all kernel directory entries
         {
             var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < MAX_DIR_ENTRIES and name_pos < MAX_NAME_STORAGE) {
+            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(fd, &kernel_buf, kernel_buf.len);
                 try checkErr(rc, "cow.getdents64 kernel read", .{});
                 if (rc == 0) break;
                 const prev_count = entry_count;
-                collectDirents(
+                dirent.collectDirents(
                     kernel_buf[0..rc],
                     &entries,
                     &entry_count,
@@ -192,11 +192,11 @@ pub const Cow = union(enum) {
         if (openOverlayDir(overlay, path)) |overlay_fd| {
             defer _ = linux.close(overlay_fd);
             var overlay_buf: [4096]u8 = undefined;
-            while (entry_count < MAX_DIR_ENTRIES and name_pos < MAX_NAME_STORAGE) {
+            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
                 try checkErr(rc, "cow.getdents64 overlay read", .{});
                 const prev_count = entry_count;
-                collectDirentsDedup(
+                dirent.collectDirentsDedup(
                     overlay_buf[0..rc],
                     &entries,
                     &entry_count,
@@ -214,43 +214,7 @@ pub const Cow = union(enum) {
             logger.log("cow.getdents64: directory listing truncated for {s} (entries={d}, name_bytes={d})", .{ path, entry_count, name_pos });
         }
 
-        // Serialize entries, skipping already-returned and tombstoned ones
-        var buf_pos: usize = 0;
-        var entry_idx: usize = 0;
-
-        for (entries[0..entry_count]) |entry| {
-            if (entry_idx < dirents_offset.*) {
-                entry_idx += 1;
-                continue;
-            }
-
-            // Don't filter . and .., but filter tombstoned children
-            if (!std.mem.eql(u8, entry.name, ".") and !std.mem.eql(u8, entry.name, "..") and tombstones.isChildTombstoned(path, entry.name)) {
-                entry_idx += 1;
-                dirents_offset.* += 1;
-                continue;
-            }
-
-            const rec_len = dirent.recLen(entry.name.len);
-            // Stop listing if exceeded length of buffer
-            if (buf_pos + rec_len > buf.len) break;
-
-            dirent.writeDirent(
-                buf[buf_pos..],
-                entry_idx + 1,
-                @intCast(entry_idx + 1),
-                @intCast(rec_len),
-                entry.d_type,
-                entry.name,
-            );
-
-            // Shift buffer position, entry index, and offset accordingly
-            buf_pos += rec_len;
-            entry_idx += 1;
-            dirents_offset.* += 1;
-        }
-
-        return buf_pos;
+        return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
     }
 
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
@@ -282,90 +246,6 @@ pub const Cow = union(enum) {
         return error.NOTSOCK;
     }
 };
-
-const MAX_DIR_ENTRIES = 2048;
-const MAX_NAME_STORAGE = 32768;
-
-const DirEntry = struct {
-    name: []const u8, // points into name_storage
-    d_type: u8,
-};
-
-/// Parse dirent64 entries from raw kernel buffer and append to the entry list.
-fn collectDirents(
-    raw: []const u8,
-    entries: []DirEntry,
-    count: *usize,
-    name_storage: *[MAX_NAME_STORAGE]u8,
-    name_pos: *usize,
-) void {
-    var pos: usize = 0;
-    while (pos + dirent.NAME_OFFSET < raw.len and count.* < entries.len) {
-        const rec_len = std.mem.readInt(u16, raw[pos + 16 ..][0..2], .little);
-        if (rec_len < dirent.NAME_OFFSET or pos + rec_len > raw.len) break;
-
-        const d_type = raw[pos + 18];
-        const name_end = pos + rec_len;
-        const name_bytes = raw[pos + dirent.NAME_OFFSET .. name_end];
-        const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
-        const name = name_bytes[0..null_pos];
-
-        if (name_pos.* + name.len <= name_storage.len) {
-            @memcpy(name_storage[name_pos.*..][0..name.len], name);
-            entries[count.*] = .{
-                .name = name_storage[name_pos.*..][0..name.len],
-                .d_type = d_type,
-            };
-            count.* += 1;
-            name_pos.* += name.len;
-        }
-
-        pos += rec_len;
-    }
-}
-
-/// Like collectDirents, but skips entries whose name already exists in the list.
-fn collectDirentsDedup(
-    raw: []const u8,
-    entries: []DirEntry,
-    count: *usize,
-    name_storage: *[MAX_NAME_STORAGE]u8,
-    name_pos: *usize,
-) void {
-    var pos: usize = 0;
-    while (pos + dirent.NAME_OFFSET < raw.len and count.* < entries.len) {
-        const rec_len = std.mem.readInt(u16, raw[pos + 16 ..][0..2], .little);
-        if (rec_len < dirent.NAME_OFFSET or pos + rec_len > raw.len) break;
-
-        const d_type = raw[pos + 18];
-        const name_end = pos + rec_len;
-        const name_bytes = raw[pos + dirent.NAME_OFFSET .. name_end];
-        const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
-        const name = name_bytes[0..null_pos];
-
-        if (!nameExists(entries[0..count.*], name)) {
-            if (name_pos.* + name.len <= name_storage.len) {
-                @memcpy(name_storage[name_pos.*..][0..name.len], name);
-                entries[count.*] = .{
-                    .name = name_storage[name_pos.*..][0..name.len],
-                    .d_type = d_type,
-                };
-                count.* += 1;
-                name_pos.* += name.len;
-            }
-        }
-
-        pos += rec_len;
-    }
-}
-
-/// Decide whether name already exists in entries list
-fn nameExists(entries: []const DirEntry, name: []const u8) bool {
-    for (entries) |e| {
-        if (std.mem.eql(u8, e.name, name)) return true;
-    }
-    return false;
-}
 
 /// Try to open the overlay cow directory for the given guest path.
 /// Returns null if the overlay directory doesn't exist.
