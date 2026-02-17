@@ -15,7 +15,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     // To redirect exec to a sandboxed file, we overwrite the path in guest memory before replyContinue.
     // Sandboxed filesystem lives at `/tmp/.bvisor/ ...`.
     // For COW/TMP files, the real overlay path is longer than the guest's buffer, so we create
-    // a short symlink in /tmp that points to the overlay path and write that into guest memory
+    // a short symlink at /.b/XXX that points to the overlay path and write that into guest memory
 
     const logger = supervisor.logger;
     const caller_tid: AbsTid = @intCast(notif.pid);
@@ -101,7 +101,12 @@ fn execViaSymlink(
 
     logger.log("execve: symlink {s} -> {s}", .{ symlink_path, kernel_path });
     try memory_bridge.writeString(symlink_path, caller_tid, path_ptr);
-    return replyContinue(notif_id);
+
+    const resp = replyContinue(notif_id);
+
+    _ = linux.unlinkat(linux.AT.FDCWD, symlink_buf[0..Symlinks.path_len :0], 0);
+
+    return resp;
 }
 
 const testing = std.testing;

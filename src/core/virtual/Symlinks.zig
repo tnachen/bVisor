@@ -11,33 +11,21 @@ const code_len = 3;
 pub const max_entries: u32 = charset_len * charset_len * charset_len; // 50,653
 pub const path_len = dir.len + 1 + code_len; // "/.b/" + "XXX" = 7
 
-const max_tracked = 128;
-
 counter: std.atomic.Value(u32),
-created: [max_tracked]u32,
-created_count: std.atomic.Value(u32),
 
 pub fn init() Self {
     return .{
         .counter = std.atomic.Value(u32).init(0),
-        .created = undefined,
-        .created_count = std.atomic.Value(u32).init(0),
     };
 }
 
-pub fn deinit(self: *Self) void {
-    const count = self.created_count.load(.monotonic);
-    for (0..count) |i| {
-        var buf: [path_len + 1]u8 = undefined;
-        _ = formatPath(self.created[i], &buf);
-        _ = linux.unlinkat(@bitCast(@as(i32, linux.AT.FDCWD)), buf[0..path_len :0], 0);
-    }
+pub fn deinit(_: *Self) void {
     // Remove /.b if empty (succeeds only if no other sandbox is using it)
-    _ = linux.unlinkat(@bitCast(@as(i32, linux.AT.FDCWD)), dir, 0x200);
+    _ = linux.unlinkat(linux.AT.FDCWD, dir, linux.AT.REMOVEDIR);
 }
 
 fn ensureDir() void {
-    _ = linux.mkdirat(@bitCast(@as(i32, linux.AT.FDCWD)), dir, 0o777);
+    _ = linux.mkdirat(linux.AT.FDCWD, dir, 0o777);
 }
 
 fn encodeIndex(idx: u32, buf: *[code_len]u8) void {
@@ -75,25 +63,19 @@ pub fn create(self: *Self, target: []const u8, original_path_len: usize, out_buf
     target_buf[target.len] = 0;
 
     while (true) {
-        const idx = self.counter.fetchAdd(1, .monotonic);
-        if (idx >= max_entries) return error.NOSPC;
+        const idx = self.counter.fetchAdd(1, .monotonic) % max_entries;
 
         _ = formatPath(idx, out_buf);
 
         const rc = linux.symlinkat(
             target_buf[0..target.len :0],
-            @bitCast(@as(i32, linux.AT.FDCWD)),
+            linux.AT.FDCWD,
             out_buf[0..path_len :0],
         );
         checkErr(rc, "Symlinks.create", .{}) catch |err| {
             if (err == error.EXIST) continue;
             return err;
         };
-
-        // Track for cleanup
-        const slot = self.created_count.fetchAdd(1, .monotonic);
-        if (slot >= max_tracked) return error.NOSPC;
-        self.created[slot] = idx;
 
         return out_buf[0..path_len];
     }
@@ -122,16 +104,6 @@ test "formatPath produces /.b/XXX" {
     try testing.expectEqualStrings("/.b/000", p);
 }
 
-test "create generates a symlink and returns 7-byte path" {
-    var s = Self.init();
-    defer s.deinit();
-
-    var buf: [path_len + 1]u8 = undefined;
-    const p = try s.create("/bin/sh", 7, &buf);
-    try testing.expectEqual(7, p.len);
-    try testing.expectEqualStrings("/.b/000", p);
-}
-
 test "create returns EPERM when original path shorter than 7" {
     var s = Self.init();
     defer s.deinit();
@@ -149,34 +121,12 @@ test "create skips EEXIST and advances to next slot" {
     // s1 claims slot 0
     var buf1: [path_len + 1]u8 = undefined;
     const p1 = try s1.create("/bin/sh", 256, &buf1);
+    defer _ = linux.unlinkat(linux.AT.FDCWD, buf1[0..path_len :0], 0);
     try testing.expectEqualStrings("/.b/000", p1);
 
     // s2 also starts at 0, hits EEXIST, advances to 1
     var buf2: [path_len + 1]u8 = undefined;
     const p2 = try s2.create("/bin/sh", 256, &buf2);
+    defer _ = linux.unlinkat(linux.AT.FDCWD, buf2[0..path_len :0], 0);
     try testing.expectEqualStrings("/.b/001", p2);
-}
-
-test "deinit cleans up only owned symlinks" {
-    var s1 = Self.init();
-    var s2 = Self.init();
-    defer s2.deinit();
-
-    // s1 claims slot 0
-    var buf1: [path_len + 1]u8 = undefined;
-    _ = try s1.create("/bin/sh", 256, &buf1);
-
-    // s2 claims slot 1 (skips 0 via EEXIST)
-    var buf2: [path_len + 1]u8 = undefined;
-    _ = try s2.create("/bin/sh", 256, &buf2);
-
-    // s1 deinit removes only slot 0
-    s1.deinit();
-
-    // slot 0 should be gone
-    const access0 = std.Io.Dir.accessAbsolute(testing.io, "/.b/000", .{});
-    try testing.expectError(error.FileNotFound, access0);
-
-    // slot 1 should still exist (owned by s2)
-    try std.Io.Dir.accessAbsolute(testing.io, "/.b/001", .{});
 }
