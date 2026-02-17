@@ -43,6 +43,7 @@ const sendto = @import("handlers/sendto.zig");
 const sendmsg = @import("handlers/sendmsg.zig");
 const recvmsg = @import("handlers/recvmsg.zig");
 const getdents64 = @import("handlers/getdents64.zig");
+const execve_ = @import("handlers/execve.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -86,6 +87,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .tkill => tkill.handle(notif, supervisor),
         .exit => exit_.handle(notif, supervisor),
         .exit_group => exit_group.handle(notif, supervisor),
+        .execve => execve_.handle(notif, supervisor),
 
         // Passthrough - create child process (kernel only, we lazily discover child later)
         .clone => replyContinue(notif.id),
@@ -93,9 +95,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .wait4 => replyContinue(notif.id),
         .waitid => replyContinue(notif.id),
 
-        // To implement - process
-        .set_tid_address,
-        .execve,
         // To implement - should virtualize (info leak in multitenant)
         .getrlimit, // leaks resource config
         .getrusage, // leaks resource usage
@@ -140,6 +139,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .getrandom,
         // Passthrough - runtime (process-local)
         .set_robust_list,
+        .set_tid_address,
         .rseq,
         => replyContinue(notif.id),
 
