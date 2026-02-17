@@ -6,6 +6,8 @@ Inspired by [gVisor](https://github.com/google/gVisor), bVisor runs programs dir
 
 Unlike gVisor, bVisor is built to run directly in your application, spinning up and tearing down sandboxes in milliseconds. This makes it ideal for ephemeral tasks commonly performed by LLM agents, such as code execution or filesystem operations.
 
+**Status**: bVisor is an early proof-of-concept and should not yet be used in production. If you detect any discrepencies between bVisor's behavior and the linux kernel, please file an issue.
+
 ## Usage
 
 The bVisor sandbox runtime and TS/JS SDK can be installed via npm.
@@ -23,7 +25,7 @@ const output = sb.runCmd("echo 'Hello, world!'");
 console.log(await output.stdout());
 ```
 
-This executes `echo 'Hello, world!'` inside a sandbox. Though for now, until bash is fully supported, bVisor ignores the command and runs a hardcoded smoke test instead.
+This executes `echo 'Hello, world!'` inside a sandbox. 
 
 Filesystem operations are safely virtualized (copy-on-write):
 ```typescript
