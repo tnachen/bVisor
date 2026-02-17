@@ -93,7 +93,7 @@ fn execViaSymlink(
 ) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
-    var symlink_buf: [Symlinks.max_path_len + 1]u8 = undefined;
+    var symlink_buf: [Symlinks.path_len + 1]u8 = undefined;
     const symlink_path = supervisor.symlinks.create(kernel_path, original_path_len, &symlink_buf) catch |err| {
         logger.log("execve: symlink creation failed: {s}", .{@errorName(err)});
         return LinuxErr.PERM;

@@ -33,7 +33,7 @@ mutex: Io.Mutex = .init,
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
 
-// Short symlinks in /tmp for execve path rewriting (points into overlay)
+// Short symlinks at /.b/ for execve path rewriting (points into overlay)
 symlinks: Symlinks,
 
 // Log buffers for stdout/stderr
@@ -61,7 +61,7 @@ pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, in
         .logger = logger,
         .guest_threads = guest_threads,
         .overlay = overlay,
-        .symlinks = Symlinks.init(uid),
+        .symlinks = Symlinks.init(),
     };
 }
 

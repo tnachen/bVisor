@@ -4,112 +4,179 @@ const checkErr = @import("../linux_error.zig").checkErr;
 
 const Self = @This();
 
-// common base of symlink path
-const base = "/tmp/.b";
-// prefix length of UID to use
-const prefix_len = 4;
-// ceil(log10(2) * 32)
-const max_counter_digits = 10;
-pub const max_path_len = base.len + prefix_len + max_counter_digits;
+const dir = "/.b";
+const charset = "0123456789abcdefghijklmnopqrstuvwxyz_";
+const charset_len = charset.len; // 37
+const code_len = 3;
+pub const max_entries: u32 = charset_len * charset_len * charset_len; // 50,653
+pub const path_len = dir.len + 1 + code_len; // "/.b/" + "XXX" = 7
 
-// prefix of sandbox UID
-uid_prefix: [prefix_len]u8,
+const max_tracked = 128;
+
 counter: std.atomic.Value(u32),
+created: [max_tracked]u32,
+created_count: std.atomic.Value(u32),
 
-pub fn init(uid: [16]u8) Self {
+pub fn init() Self {
     return .{
-        .uid_prefix = uid[0..prefix_len].*,
         .counter = std.atomic.Value(u32).init(0),
+        .created = undefined,
+        .created_count = std.atomic.Value(u32).init(0),
     };
 }
 
 pub fn deinit(self: *Self) void {
-    const count = self.counter.load(.monotonic);
+    const count = self.created_count.load(.monotonic);
     for (0..count) |i| {
-        var buf: [max_path_len + 1]u8 = undefined;
-        // path = `/tmp/.b<uid_prefix><counter>`
-        const path = std.fmt.bufPrint(&buf, base ++ "{s}{d}", .{ &self.uid_prefix, i }) catch continue;
-        buf[path.len] = 0;
+        var buf: [path_len + 1]u8 = undefined;
+        _ = formatPath(self.created[i], &buf);
+        _ = linux.unlinkat(@bitCast(@as(i32, linux.AT.FDCWD)), buf[0..path_len :0], 0);
+    }
+    // Remove /.b if empty (succeeds only if no other sandbox is using it)
+    _ = linux.unlinkat(@bitCast(@as(i32, linux.AT.FDCWD)), dir, 0x200);
+}
 
-        // unlinkat syscall
-        _ = linux.unlinkat(@bitCast(@as(i32, linux.AT.FDCWD)), buf[0..path.len :0], 0);
+fn ensureDir() void {
+    _ = linux.mkdirat(@bitCast(@as(i32, linux.AT.FDCWD)), dir, 0o777);
+}
+
+fn encodeIndex(idx: u32, buf: *[code_len]u8) void {
+    var n = idx;
+    var i: usize = code_len;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = charset[n % charset_len];
+        n /= charset_len;
     }
 }
 
-/// Creates a symlink at a short path pointing to `target` (the real overlay path).
-/// `original_path_len` is the guest's original path length; the symlink path must fit within it.
-/// Returns the symlink path as a slice of `out_buf`
-pub fn create(self: *Self, target: []const u8, original_path_len: usize, out_buf: *[max_path_len + 1]u8) ![]const u8 {
-    const idx = self.counter.fetchAdd(1, .monotonic);
-    const symlink_path = std.fmt.bufPrint(out_buf, base ++ "{s}{d}", .{ &self.uid_prefix, idx }) catch return error.NAMETOOLONG;
+fn formatPath(idx: u32, buf: *[path_len + 1]u8) []const u8 {
+    @memcpy(buf[0..dir.len], dir);
+    buf[dir.len] = '/';
+    var code: [code_len]u8 = undefined;
+    encodeIndex(idx, &code);
+    @memcpy(buf[dir.len + 1 ..][0..code_len], &code);
+    buf[path_len] = 0;
+    return buf[0..path_len];
+}
 
-    // Should not write more bytes into guest's memory than what was originally allocated
-    if (symlink_path.len > original_path_len) {
-        return error.PERM;
-    }
+/// Creates a symlink at a short path (/.b/XXX) pointing to `target`.
+/// `original_path_len` is the guest's original path length; the symlink must fit within it.
+/// Returns the symlink path as a slice of `out_buf`.
+/// Probes for a free slot if another sandbox has claimed the current index (EEXIST).
+pub fn create(self: *Self, target: []const u8, original_path_len: usize, out_buf: *[path_len + 1]u8) ![]const u8 {
+    if (path_len > original_path_len) return error.PERM;
 
-    // Zero-terminate for linux syscall
-    out_buf[symlink_path.len] = 0;
+    ensureDir();
 
     var target_buf: [513]u8 = undefined;
     if (target.len > 512) return error.NAMETOOLONG;
     @memcpy(target_buf[0..target.len], target);
     target_buf[target.len] = 0;
 
-    // Symlinkat syscall
-    const rc = linux.symlinkat(
-        target_buf[0..target.len :0],
-        @bitCast(@as(i32, linux.AT.FDCWD)),
-        out_buf[0..symlink_path.len :0],
-    );
-    try checkErr(rc, "Symlinks.create", .{});
+    while (true) {
+        const idx = self.counter.fetchAdd(1, .monotonic);
+        if (idx >= max_entries) return error.NOSPC;
 
-    return symlink_path;
+        _ = formatPath(idx, out_buf);
+
+        const rc = linux.symlinkat(
+            target_buf[0..target.len :0],
+            @bitCast(@as(i32, linux.AT.FDCWD)),
+            out_buf[0..path_len :0],
+        );
+        checkErr(rc, "Symlinks.create", .{}) catch |err| {
+            if (err == error.EXIST) continue;
+            return err;
+        };
+
+        // Track for cleanup
+        const slot = self.created_count.fetchAdd(1, .monotonic);
+        if (slot >= max_tracked) return error.NOSPC;
+        self.created[slot] = idx;
+
+        return out_buf[0..path_len];
+    }
 }
 
 const testing = std.testing;
 
-test "init sets uid_prefix from first 4 chars" {
-    const uid: [16]u8 = "abcdef0123456789".*;
-    const s = Self.init(uid);
-    try testing.expectEqualStrings("abcd", &s.uid_prefix);
+test "encodeIndex produces base-37 encoding" {
+    var buf: [code_len]u8 = undefined;
+    encodeIndex(0, &buf);
+    try testing.expectEqualStrings("000", &buf);
+
+    encodeIndex(1, &buf);
+    try testing.expectEqualStrings("001", &buf);
+
+    encodeIndex(36, &buf);
+    try testing.expectEqualStrings("00_", &buf);
+
+    encodeIndex(37, &buf);
+    try testing.expectEqualStrings("010", &buf);
 }
 
-test "create generates sequential paths" {
-    const uid: [16]u8 = "symlsymlsyml0001".*;
-    var s = Self.init(uid);
+test "formatPath produces /.b/XXX" {
+    var buf: [path_len + 1]u8 = undefined;
+    const p = formatPath(0, &buf);
+    try testing.expectEqualStrings("/.b/000", p);
+}
+
+test "create generates a symlink and returns 7-byte path" {
+    var s = Self.init();
     defer s.deinit();
 
-    var buf1: [max_path_len + 1]u8 = undefined;
-    const path1 = try s.create("/bin/sh", 256, &buf1);
-    try testing.expectEqualStrings("/tmp/.bsyml0", path1);
-
-    var buf2: [max_path_len + 1]u8 = undefined;
-    const path2 = try s.create("/bin/sh", 256, &buf2);
-    try testing.expectEqualStrings("/tmp/.bsyml1", path2);
+    var buf: [path_len + 1]u8 = undefined;
+    const p = try s.create("/bin/sh", 7, &buf);
+    try testing.expectEqual(7, p.len);
+    try testing.expectEqualStrings("/.b/000", p);
 }
 
-test "create returns EPERM when symlink path longer than original" {
-    const uid: [16]u8 = "symlsymlsyml0002".*;
-    var s = Self.init(uid);
+test "create returns EPERM when original path shorter than 7" {
+    var s = Self.init();
     defer s.deinit();
 
-    var buf: [max_path_len + 1]u8 = undefined;
-    // "/tmp/.bsyml0" is 12 chars, so original_path_len=5 should fail
-    try testing.expectError(error.PERM, s.create("/some/target", 5, &buf));
+    var buf: [path_len + 1]u8 = undefined;
+    try testing.expectError(error.PERM, s.create("/bin/sh", 6, &buf));
 }
 
-test "deinit cleans up created symlinks" {
-    const uid: [16]u8 = "symlsymlsyml0003".*;
-    var s = Self.init(uid);
+test "create skips EEXIST and advances to next slot" {
+    var s1 = Self.init();
+    defer s1.deinit();
+    var s2 = Self.init();
+    defer s2.deinit();
 
-    var buf: [max_path_len + 1]u8 = undefined;
-    _ = try s.create("/bin/sh", 256, &buf);
+    // s1 claims slot 0
+    var buf1: [path_len + 1]u8 = undefined;
+    const p1 = try s1.create("/bin/sh", 256, &buf1);
+    try testing.expectEqualStrings("/.b/000", p1);
 
-    try testing.expectEqual(1, s.counter.load(.monotonic));
+    // s2 also starts at 0, hits EEXIST, advances to 1
+    var buf2: [path_len + 1]u8 = undefined;
+    const p2 = try s2.create("/bin/sh", 256, &buf2);
+    try testing.expectEqualStrings("/.b/001", p2);
+}
 
-    s.deinit();
-    // Symlink should be removed; verify by trying to access it
-    const access_result = std.Io.Dir.accessAbsolute(testing.io, "/tmp/.bsyml0", .{});
-    try testing.expectError(error.FileNotFound, access_result);
+test "deinit cleans up only owned symlinks" {
+    var s1 = Self.init();
+    var s2 = Self.init();
+    defer s2.deinit();
+
+    // s1 claims slot 0
+    var buf1: [path_len + 1]u8 = undefined;
+    _ = try s1.create("/bin/sh", 256, &buf1);
+
+    // s2 claims slot 1 (skips 0 via EEXIST)
+    var buf2: [path_len + 1]u8 = undefined;
+    _ = try s2.create("/bin/sh", 256, &buf2);
+
+    // s1 deinit removes only slot 0
+    s1.deinit();
+
+    // slot 0 should be gone
+    const access0 = std.Io.Dir.accessAbsolute(testing.io, "/.b/000", .{});
+    try testing.expectError(error.FileNotFound, access0);
+
+    // slot 1 should still exist (owned by s2)
+    try std.Io.Dir.accessAbsolute(testing.io, "/.b/001", .{});
 }
