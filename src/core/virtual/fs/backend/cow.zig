@@ -195,6 +195,7 @@ pub const Cow = union(enum) {
             while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
                 try checkErr(rc, "cow.getdents64 overlay read", .{});
+                if (rc == 0) break;
                 const prev_count = entry_count;
                 dirent.collectDirentsDedup(
                     overlay_buf[0..rc],
@@ -203,7 +204,7 @@ pub const Cow = union(enum) {
                     &name_storage,
                     &name_pos,
                 );
-                if (entry_count == prev_count and rc > 0) {
+                if (entry_count == prev_count) {
                     truncated = true;
                     break;
                 }
