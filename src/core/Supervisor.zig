@@ -9,6 +9,7 @@ const syscalls = @import("virtual/syscall/syscalls.zig");
 const Logger = types.Logger;
 const Threads = @import("virtual/proc/Threads.zig");
 const OverlayRoot = @import("virtual/OverlayRoot.zig");
+const Tombstones = @import("virtual/Tombstones.zig");
 const LogBuffer = @import("LogBuffer.zig");
 const Allocator = std.mem.Allocator;
 
@@ -31,6 +32,9 @@ mutex: Io.Mutex = .init,
 
 // Overlay root for sandbox filesystem isolation (COW + private /tmp)
 overlay: OverlayRoot,
+
+// Tracks deleted paths within the sandbox (files and directories)
+tombstones: Tombstones,
 
 // Log buffers for stdout/stderr
 // Owned by the runCmd invocation in SDK
@@ -57,6 +61,7 @@ pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, in
         .logger = logger,
         .guest_threads = guest_threads,
         .overlay = overlay,
+        .tombstones = Tombstones.init(allocator),
     };
 }
 
@@ -65,6 +70,7 @@ pub fn deinit(self: *Self) void {
         _ = linux.close(self.notify_fd);
     }
     self.guest_threads.deinit();
+    self.tombstones.deinit();
     self.overlay.deinit();
     // LogBuffers are owned by caller, not freed here
 }

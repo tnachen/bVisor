@@ -85,6 +85,17 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg2)));
             const mode: linux.mode_t = @truncate(notif.data.arg3);
 
+            // Check tombstones for COW/tmp paths
+            if (h.backend == .cow or h.backend == .tmp) {
+                if (supervisor.tombstones.isTombstoned(h.normalized)) {
+                    if (flags.CREAT) {
+                        supervisor.tombstones.remove(h.normalized);
+                    } else {
+                        return LinuxErr.NOENT;
+                    }
+                }
+            }
+
             // Special case: if we're in the /proc filepath
             // We need to sync guest_threads with the kernel to ensure all current PIDs are registered
             if (h.backend == .proc) {

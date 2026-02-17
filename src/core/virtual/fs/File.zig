@@ -3,6 +3,7 @@ const linux = std.os.linux;
 
 const Thread = @import("../proc/Thread.zig");
 const OverlayRoot = @import("../OverlayRoot.zig");
+const Tombstones = @import("../Tombstones.zig");
 
 const Cow = @import("backend/cow.zig").Cow;
 const Tmp = @import("backend/tmp.zig").Tmp;
@@ -29,6 +30,7 @@ allocator: std.mem.Allocator,
 ref_count: AtomicUsize = undefined,
 opened_path: ?[]u8 = null,
 open_flags: linux.O = .{},
+dirents_offset: usize = 0,
 
 pub fn init(allocator: std.mem.Allocator, backend: Backend) !*Self {
     const self = try allocator.create(Self);
@@ -64,13 +66,6 @@ fn deinit(self: *Self) void {
 pub fn setOpenedPath(self: *Self, path: ?[]const u8) !void {
     if (self.opened_path) |old| self.allocator.free(old);
     self.opened_path = if (path) |p| try self.allocator.dupe(u8, p) else null;
-}
-
-pub fn getdents64(self: *Self, buf: []u8, caller: *Thread) !usize {
-    return switch (self.backend) {
-        .proc => |*f| f.getdents64(buf, caller, self.opened_path orelse return error.BADF),
-        else => error.NOSYS, // non-proc backends use kernel FD path in handler
-    };
 }
 
 pub fn read(self: *Self, buf: []u8) !usize {
@@ -128,6 +123,15 @@ pub fn statxByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []con
         .tmp => Tmp.statxByPath(overlay, path),
         .proc => ProcFile.statxByPath(caller.?, path),
     };
+}
+
+pub fn getdents64(self: *Self, buf: []u8, caller: ?*Thread, overlay: *OverlayRoot, tombstones: *const Tombstones) !usize {
+    switch (self.backend) {
+        .passthrough => |*f| return f.getdents64(buf),
+        .tmp => |*f| return f.getdents64(buf),
+        .cow => |*f| return f.getdents64(buf, self.opened_path, &self.dirents_offset, overlay, tombstones),
+        .proc => |*f| return f.getdents64(buf, caller.?, self.opened_path orelse return error.BADF, &self.dirents_offset),
+    }
 }
 
 /// Encode major/minor into a dev_t using the full Linux makedev formula

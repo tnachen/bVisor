@@ -3,6 +3,7 @@ const linux = std.os.linux;
 const Thread = @import("../../proc/Thread.zig");
 const NsTgid = Thread.NsTgid;
 const Namespace = @import("../../proc/Namespace.zig");
+const dirent = @import("../dirent.zig");
 
 /// Procfile handles all internals of /proc/<nstgid_or_self>/...
 /// The trick is that the content is generated at opentime
@@ -11,7 +12,6 @@ pub const ProcFile = struct {
     content: [256]u8,
     content_len: usize,
     offset: usize,
-    dirents_offset: usize = 0, // TODO: consider if this is the best way to do this
 
     pub const ProcTarget = union(enum) {
         dir_proc, // new
@@ -117,24 +117,20 @@ pub const ProcFile = struct {
         return slice.len;
     }
 
-    // ============= FIRST ATTEMPT AT PRODUCING DIRECTORY ENTRIES FOR PROCFILE ======
     /// Synthesize linux_dirent64 entries for a /proc directory listing.
     /// `caller` is needed to enumerate visible PIDs from the caller's namespace.
     /// `opened_path` distinguishes /proc (list PIDs) from /proc/<pid> (list subfiles).
-    pub fn getdents64(self: *ProcFile, buf: []u8, caller: *Thread, opened_path: []const u8) !usize {
-        // Build the full list of entry names into a stack buffer
+    pub fn getdents64(_: *ProcFile, buf: []u8, caller: *Thread, opened_path: []const u8, dirents_offset: *usize) !usize {
         var names_buf: [64][]const u8 = undefined;
-        var num_fmt_buf: [32][16]u8 = undefined; // backing storage for formatted PID strings
+        var num_fmt_buf: [64][16]u8 = undefined;
         var name_count: usize = 0;
 
-        // Every directory has . and ..
         names_buf[name_count] = ".";
         name_count += 1;
         names_buf[name_count] = "..";
         name_count += 1;
 
         if (std.mem.eql(u8, opened_path, "/proc")) {
-            // List "self" + each visible NsTgid in caller's namespace
             names_buf[name_count] = "self";
             name_count += 1;
 
@@ -154,20 +150,16 @@ pub const ProcFile = struct {
             name_count += 1;
         }
 
-        // Serialize entries starting from self.dirents_offset into buf
         var buf_pos: usize = 0;
         var entry_idx: usize = 0;
 
         for (names_buf[0..name_count]) |name| {
-            const name_len = name.len + 1; // include null terminator
-            const rec_len = std.mem.alignForward(usize, @sizeOf(DirentHeader) + name_len, 8);
-
-            // Skip entries we've already returned in previous calls
-            if (entry_idx < self.dirents_offset) {
+            if (entry_idx < dirents_offset.*) {
                 entry_idx += 1;
                 continue;
             }
 
+            const rec_len = dirent.recLen(name.len);
             if (buf_pos + rec_len > buf.len) break;
 
             const d_type: u8 = if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
@@ -179,38 +171,14 @@ pub const ProcFile = struct {
             else
                 linux.DT.DIR; // numeric PID entries are directories
 
-            writeDirent(buf[buf_pos..], entry_idx + 1, @intCast(rec_len), d_type, name);
+            dirent.writeDirent(buf[buf_pos..], entry_idx + 1, @intCast(rec_len), d_type, name);
             buf_pos += rec_len;
             entry_idx += 1;
-            self.dirents_offset += 1;
+            dirents_offset.* += 1;
         }
 
         return buf_pos;
     }
-
-    const DirentHeader = extern struct {
-        d_ino: u64,
-        d_off: i64,
-        d_reclen: u16,
-        d_type: u8,
-    };
-
-    fn writeDirent(buf: []u8, ino: u64, rec_len: u16, d_type: u8, name: []const u8) void {
-        const header: DirentHeader = .{
-            .d_ino = ino,
-            .d_off = @intCast(ino), // offset cookie, just use sequential index
-            .d_reclen = rec_len,
-            .d_type = d_type,
-        };
-        const header_bytes = std.mem.asBytes(&header);
-        @memcpy(buf[0..header_bytes.len], header_bytes);
-
-        const name_start = @sizeOf(DirentHeader);
-        @memcpy(buf[name_start .. name_start + name.len], name);
-        // Null-terminate and zero-pad to rec_len
-        @memset(buf[name_start + name.len .. rec_len], 0);
-    }
-    // ============^^^^ FIRST ATTEMPT AT PRODUCING DIRECTORY ENTRIES FOR PROCFILE ======
 
     pub fn read(self: *ProcFile, buf: []u8) !usize {
         const remaining = self.content[self.offset..self.content_len];

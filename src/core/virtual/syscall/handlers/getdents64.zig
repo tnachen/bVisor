@@ -9,11 +9,11 @@ const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const replyContinue = @import("../../../seccomp/notif.zig").replyContinue;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
+const dirent = @import("../../fs/dirent.zig");
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
-    // Parse args: getdents64(fd, buf_addr, count)
     const caller_tid: AbsTid = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const buf_addr: u64 = notif.data.arg1;
@@ -32,7 +32,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
 
         file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("close: EBADF for fd={d}", .{fd});
+            logger.log("getdents64: EBADF for fd={d}", .{fd});
             return LinuxErr.BADF;
         };
     }
@@ -42,22 +42,15 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     var stack_buf: [max_len]u8 = undefined;
     const capped_count = @min(count, max_len);
 
-    const n: usize = if (file.backingFd()) |backing_fd| blk: {
-        // Backends with a kernel FD (passthrough/cow/tmp): forward to kernel
-        const rc = linux.getdents64(backing_fd, &stack_buf, capped_count);
-        try checkErr(rc, "getdents64 fd={d}", .{fd});
-        break :blk rc;
-    } else blk: {
-        // Proc backend: synthesize directory entries from namespace state
+    // Proc backend needs mutex held during getdents64 (iterates namespace threads)
+    const n: usize = if (file.backend == .proc) blk: {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
         const caller = try supervisor.guest_threads.get(caller_tid);
-        break :blk try file.getdents64(stack_buf[0..capped_count], caller);
-    };
+        break :blk try file.getdents64(stack_buf[0..capped_count], caller, &supervisor.overlay, &supervisor.tombstones);
+    } else try file.getdents64(stack_buf[0..capped_count], null, &supervisor.overlay, &supervisor.tombstones);
 
-    if (n > 0) {
-        try memory_bridge.writeSlice(stack_buf[0..n], @intCast(notif.pid), buf_addr);
-    }
+    if (n > 0) try memory_bridge.writeSlice(stack_buf[0..n], @intCast(notif.pid), buf_addr);
 
     logger.log("getdents64: fd={d} returned {d} bytes", .{ fd, n });
     return replySuccess(notif.id, @intCast(n));
@@ -69,6 +62,22 @@ const isContinue = @import("../../../seccomp/notif.zig").isContinue;
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
 const ProcFile = @import("../../fs/backend/procfile.zig").ProcFile;
+const Cow = @import("../../fs/backend/cow.zig").Cow;
+
+fn parseDirentNames(buf: []const u8, out: [][]const u8) usize {
+    var count_: usize = 0;
+    var pos: usize = 0;
+    while (pos + dirent.NAME_OFFSET < buf.len and count_ < out.len) {
+        const rec_len = std.mem.readInt(u16, buf[pos + 16 ..][0..2], .little);
+        if (rec_len < dirent.NAME_OFFSET or pos + rec_len > buf.len) break;
+        const name_bytes = buf[pos + dirent.NAME_OFFSET .. pos + rec_len];
+        const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
+        out[count_] = name_bytes[0..null_pos];
+        count_ += 1;
+        pos += rec_len;
+    }
+    return count_;
+}
 
 test "getdents64 on directory returns entries" {
     const allocator = testing.allocator;
@@ -153,7 +162,6 @@ test "getdents64 on proc /proc/self lists status entry" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    // Open /proc/self as a proc file and set its opened_path so getdents64 knows the context
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
     const proc_file = try ProcFile.open(caller, "/proc/self");
     const file = try File.init(allocator, .{ .proc = proc_file });
@@ -192,4 +200,178 @@ test "getdents64 on stdio returns replyContinue" {
 
     const resp = try handle(notif, &supervisor);
     try testing.expect(isContinue(resp));
+}
+
+test "COW getdents64 lists real directory contents" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // Open /tmp as a COW readthrough directory
+    const raw_fd_rc = linux.openat(linux.AT.FDCWD, "/tmp", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    try checkErr(raw_fd_rc, "test: open /tmp dir", .{});
+    const raw_fd: linux.fd_t = @intCast(raw_fd_rc);
+
+    const file = try File.init(allocator, .{ .cow = .{ .readthrough = raw_fd } });
+    try file.setOpenedPath("/tmp");
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
+    const vfd = try caller.fd_table.insert(file, .{});
+
+    var result_buf: [4096]u8 = undefined;
+    const notif = makeNotif(.getdents64, .{
+        .pid = init_tid,
+        .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
+        .arg1 = @intFromPtr(&result_buf),
+        .arg2 = result_buf.len,
+    });
+
+    const resp = try handle(notif, &supervisor);
+    try testing.expect(resp.val > 0);
+
+    // Parse entries and verify . and .. are present
+    var names: [64][]const u8 = undefined;
+    const name_count = parseDirentNames(result_buf[0..@intCast(resp.val)], &names);
+    try testing.expect(name_count >= 2);
+
+    var found_dot = false;
+    var found_dotdot = false;
+    for (names[0..name_count]) |name| {
+        if (std.mem.eql(u8, name, ".")) found_dot = true;
+        if (std.mem.eql(u8, name, "..")) found_dotdot = true;
+    }
+    try testing.expect(found_dot);
+    try testing.expect(found_dotdot);
+}
+
+test "COW getdents64 filters tombstoned entries" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // Create a test directory with a known file
+    const dir_path = "/tmp/bvisor_test_getdents_ts";
+    const file_path = "/tmp/bvisor_test_getdents_ts/target.txt";
+
+    // Create directory and file
+    var dir_path_z: [dir_path.len + 1]u8 = undefined;
+    @memcpy(dir_path_z[0..dir_path.len], dir_path);
+    dir_path_z[dir_path.len] = 0;
+    _ = linux.mkdir(dir_path_z[0..dir_path.len :0], 0o755);
+
+    var file_path_z: [file_path.len + 1]u8 = undefined;
+    @memcpy(file_path_z[0..file_path.len], file_path);
+    file_path_z[file_path.len] = 0;
+    const create_rc = linux.openat(linux.AT.FDCWD, file_path_z[0..file_path.len :0], .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+    if (linux.errno(create_rc) == .SUCCESS) _ = linux.close(@intCast(create_rc));
+    defer {
+        _ = linux.unlink(file_path_z[0..file_path.len :0]);
+        _ = linux.rmdir(dir_path_z[0..dir_path.len :0]);
+    }
+
+    // Open directory as COW readthrough
+    const raw_fd_rc = linux.openat(linux.AT.FDCWD, dir_path_z[0..dir_path.len :0], .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    try checkErr(raw_fd_rc, "test: open dir", .{});
+    const raw_fd: linux.fd_t = @intCast(raw_fd_rc);
+
+    const file = try File.init(allocator, .{ .cow = .{ .readthrough = raw_fd } });
+    try file.setOpenedPath(dir_path);
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
+    const vfd = try caller.fd_table.insert(file, .{});
+
+    // First: verify target.txt appears without tombstone
+    {
+        var result_buf: [4096]u8 = undefined;
+        const notif = makeNotif(.getdents64, .{
+            .pid = init_tid,
+            .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
+            .arg1 = @intFromPtr(&result_buf),
+            .arg2 = result_buf.len,
+        });
+        const resp = try handle(notif, &supervisor);
+        var names: [64][]const u8 = undefined;
+        const count_ = parseDirentNames(result_buf[0..@intCast(resp.val)], &names);
+        var found = false;
+        for (names[0..count_]) |name| {
+            if (std.mem.eql(u8, name, "target.txt")) found = true;
+        }
+        try testing.expect(found);
+    }
+
+    // Add tombstone and reset dirents_offset
+    try supervisor.tombstones.add(file_path, .file);
+    file.dirents_offset = 0;
+
+    // Second: verify target.txt is hidden after tombstone
+    {
+        var result_buf: [4096]u8 = undefined;
+        const notif = makeNotif(.getdents64, .{
+            .pid = init_tid,
+            .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
+            .arg1 = @intFromPtr(&result_buf),
+            .arg2 = result_buf.len,
+        });
+        const resp = try handle(notif, &supervisor);
+        var names: [64][]const u8 = undefined;
+        const count_ = parseDirentNames(result_buf[0..@intCast(resp.val)], &names);
+        for (names[0..count_]) |name| {
+            try testing.expect(!std.mem.eql(u8, name, "target.txt"));
+        }
+    }
+}
+
+test "COW getdents64 second call returns EOF" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // Open /tmp as COW
+    const raw_fd_rc = linux.openat(linux.AT.FDCWD, "/tmp", .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+    try checkErr(raw_fd_rc, "test: open /tmp dir", .{});
+    const raw_fd: linux.fd_t = @intCast(raw_fd_rc);
+
+    const file = try File.init(allocator, .{ .cow = .{ .readthrough = raw_fd } });
+    try file.setOpenedPath("/tmp");
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
+    const vfd = try caller.fd_table.insert(file, .{});
+
+    // First call: returns entries
+    {
+        var result_buf: [4096]u8 = undefined;
+        const notif = makeNotif(.getdents64, .{
+            .pid = init_tid,
+            .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
+            .arg1 = @intFromPtr(&result_buf),
+            .arg2 = result_buf.len,
+        });
+        const resp = try handle(notif, &supervisor);
+        try testing.expect(resp.val > 0);
+    }
+
+    // Second call: returns 0 (EOF)
+    {
+        var result_buf: [4096]u8 = undefined;
+        const notif = makeNotif(.getdents64, .{
+            .pid = init_tid,
+            .arg0 = @as(u64, @bitCast(@as(i64, vfd))),
+            .arg1 = @intFromPtr(&result_buf),
+            .arg2 = result_buf.len,
+        });
+        const resp = try handle(notif, &supervisor);
+        try testing.expectEqual(@as(i64, 0), resp.val);
+    }
 }

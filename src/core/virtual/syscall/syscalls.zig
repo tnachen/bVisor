@@ -93,9 +93,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .wait4 => replyContinue(notif.id),
         .waitid => replyContinue(notif.id),
 
-        // To implement - files
-        .ioctl,
-        .getdents64,
         // To implement - process
         .set_tid_address,
         .execve,

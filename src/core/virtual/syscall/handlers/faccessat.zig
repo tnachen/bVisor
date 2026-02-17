@@ -73,6 +73,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             return LinuxErr.ACCES;
         },
         .handle => |h| {
+            // Check tombstones for COW/tmp paths
+            if (h.backend == .cow or h.backend == .tmp) {
+                if (supervisor.tombstones.isTombstoned(h.normalized)) {
+                    return LinuxErr.NOENT;
+                }
+            }
+
             switch (h.backend) {
                 .proc => {
                     // For /proc paths, check if the virtualized file would exist.

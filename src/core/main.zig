@@ -57,6 +57,7 @@ test {
     _ = @import("virtual/syscall/handlers/getdents64.zig");
     _ = @import("virtual/syscall/e2e_test.zig");
     _ = @import("virtual/OverlayRoot.zig");
+    _ = @import("virtual/Tombstones.zig");
     _ = @import("virtual/fs/backend/passthrough.zig");
 }
 

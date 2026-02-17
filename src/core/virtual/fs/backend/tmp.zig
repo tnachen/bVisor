@@ -91,6 +91,12 @@ pub const Tmp = struct {
         return @intCast(rc);
     }
 
+    pub fn getdents64(self: *Tmp, buf: []u8) !usize {
+        const rc = linux.getdents64(self.fd, buf.ptr, buf.len);
+        try checkErr(rc, "tmp.getdents64", .{});
+        return rc;
+    }
+
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {
         const rc = linux.ioctl(self.fd, @bitCast(request), arg);
         try checkErr(rc, "tmp.ioctl", .{});
