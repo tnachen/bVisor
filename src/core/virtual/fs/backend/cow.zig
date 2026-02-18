@@ -9,11 +9,8 @@ const Logger = @import("../../../types.zig").Logger;
 const BackingFD = linux.fd_t;
 
 fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
-    var path_buf: [513]u8 = undefined;
-    if (path.len > 512) return error.NAMETOOLONG;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const rc = linux.openat(linux.AT.FDCWD, path_buf[0..path.len :0], flags, mode);
+    const buf = OverlayRoot.nullTerminate(path) catch return error.NAMETOOLONG;
+    const rc = linux.openat(linux.AT.FDCWD, buf[0..path.len :0], flags, mode);
     try checkErr(rc, "cow.sysOpenat", .{});
     return @intCast(rc);
 }
@@ -154,65 +151,37 @@ pub const Cow = union(enum) {
             return rc;
         };
 
-        const logger = Logger.init(.supervisor);
-
         var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
         var name_pos: usize = 0;
-
         var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
         var entry_count: usize = 0;
 
-        // Open the real directory on the host filesystem for base entries.
-        // We can't use the backing fd here because writecopy fds point to
-        // the overlay, not the real path.
-        const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
-            logger.log("cow.getdents64: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
-            return 0;
-        };
-        defer _ = linux.close(real_fd);
-
-        // Read all kernel directory entries from the real path
-        {
-            var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
-                const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
-                try checkErr(rc, "cow.getdents64 kernel read", .{});
-                if (rc == 0) break;
-                dirent.collectDirents(
-                    kernel_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
-                );
-            }
-        }
-
-        // Read overlay directory entries (if overlay cow dir exists for this path)
-        if (openOverlayDir(overlay, path)) |overlay_fd| {
-            defer _ = linux.close(overlay_fd);
-            var overlay_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
-                const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
-                try checkErr(rc, "cow.getdents64 overlay read", .{});
-                if (rc == 0) break;
-                dirent.collectDirentsDedup(
-                    overlay_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
-                );
-            }
-        }
+        collectMergedEntries(path, overlay, &entries, &entry_count, &name_storage, &name_pos);
 
         if (entry_count >= dirent.MAX_DIR_ENTRIES or name_pos >= dirent.MAX_NAME_STORAGE) {
+            const logger = Logger.init(.supervisor);
             logger.log("cow.getdents64: capacity exceeded for {s} (entries={d}/{d}, name_bytes={d}/{d})", .{
                 path, entry_count, dirent.MAX_DIR_ENTRIES, name_pos, dirent.MAX_NAME_STORAGE,
             });
         }
 
         return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
+    }
+
+    pub fn mkdir(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        try overlay.createCowParentDirs(path);
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return error.NAMETOOLONG;
+        const rc = linux.mkdirat(linux.AT.FDCWD, buf[0..cow_path.len :0], mode);
+        try checkErr(rc, "cow.mkdir", .{});
+    }
+
+    pub fn unlink(overlay: *OverlayRoot, path: []const u8) void {
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = overlay.resolveCow(path, &cow_path_buf) catch return;
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], 0);
     }
 
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
@@ -250,20 +219,60 @@ pub const Cow = union(enum) {
 fn openOverlayDir(overlay: *OverlayRoot, dir_path: []const u8) ?linux.fd_t {
     var cow_path_buf: [512]u8 = undefined;
     const cow_dir_path = overlay.resolveCow(dir_path, &cow_path_buf) catch return null;
-
-    var path_buf: [513]u8 = undefined;
-    if (cow_dir_path.len > 512) return null;
-    @memcpy(path_buf[0..cow_dir_path.len], cow_dir_path);
-    path_buf[cow_dir_path.len] = 0;
-
-    const rc = linux.openat(
-        linux.AT.FDCWD,
-        path_buf[0..cow_dir_path.len :0],
-        .{ .ACCMODE = .RDONLY, .DIRECTORY = true },
-        0,
-    );
+    const buf = OverlayRoot.nullTerminate(cow_dir_path) catch return null;
+    const rc = linux.openat(linux.AT.FDCWD, buf[0..cow_dir_path.len :0], .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return null;
     return @intCast(rc);
+}
+
+/// Collect merged directory entries from both the real filesystem and the COW overlay.
+/// Used by both getdents64 and isDirEmpty to avoid duplicating merge logic.
+fn collectMergedEntries(
+    dir_path: []const u8,
+    overlay: *OverlayRoot,
+    entries: *[dirent.MAX_DIR_ENTRIES]dirent.DirEntry,
+    entry_count: *usize,
+    name_storage: *[dirent.MAX_NAME_STORAGE]u8,
+    name_pos: *usize,
+) void {
+    // Collect entries from the real filesystem directory
+    if (sysOpenat(dir_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0)) |real_fd| {
+        defer _ = linux.close(real_fd);
+        var kernel_buf: [4096]u8 = undefined;
+        while (entry_count.* < dirent.MAX_DIR_ENTRIES and name_pos.* < dirent.MAX_NAME_STORAGE) {
+            const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+            dirent.collectDirents(kernel_buf[0..rc], entries, entry_count, name_storage, name_pos);
+        }
+    } else |_| {}
+
+    // Collect entries from the overlay cow directory (dedup)
+    if (openOverlayDir(overlay, dir_path)) |overlay_fd| {
+        defer _ = linux.close(overlay_fd);
+        var overlay_buf: [4096]u8 = undefined;
+        while (entry_count.* < dirent.MAX_DIR_ENTRIES and name_pos.* < dirent.MAX_NAME_STORAGE) {
+            const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+            dirent.collectDirentsDedup(overlay_buf[0..rc], entries, entry_count, name_storage, name_pos);
+        }
+    }
+}
+
+/// Check if a COW directory appears empty from the guest's perspective.
+/// Merges kernel + overlay entries, filters tombstones, ignores . and ..
+pub fn isDirEmpty(dir_path: []const u8, overlay: *OverlayRoot, tombstones: *const Tombstones) !bool {
+    var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
+    var name_pos: usize = 0;
+    var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
+    var entry_count: usize = 0;
+
+    collectMergedEntries(dir_path, overlay, &entries, &entry_count, &name_storage, &name_pos);
+
+    for (entries[0..entry_count]) |entry| {
+        if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+        if (!tombstones.isChildTombstoned(dir_path, entry.name)) return false;
+    }
+    return true;
 }
 
 /// Copy a file from src to dst

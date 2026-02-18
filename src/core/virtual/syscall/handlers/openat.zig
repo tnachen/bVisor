@@ -47,7 +47,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
 
         // Relative path with a real dirfd: use dirfd's opened path as base
-        if (path[0] != '/' and dirfd != -100) {
+        if (path[0] != '/' and dirfd != linux.AT.FDCWD) {
             const dir_file = caller.fd_table.get_ref(dirfd) orelse {
                 logger.log("openat: EBADF for dirfd={d}", .{dirfd});
                 return LinuxErr.BADF;

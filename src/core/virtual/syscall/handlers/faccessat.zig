@@ -6,6 +6,7 @@ const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const path_router = @import("../../path.zig");
 const resolveAndRoute = path_router.resolveAndRoute;
+const OverlayRoot = @import("../../OverlayRoot.zig");
 const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
@@ -39,7 +40,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         // Get caller Thread
         const caller = try supervisor.guest_threads.get(caller_tid);
 
-        if (dirfd != -100) {
+        if (dirfd != linux.AT.FDCWD) {
             const dir_file = caller.fd_table.get_ref(dirfd) orelse {
                 logger.log("faccessat: EBADF for dirfd={d}", .{dirfd});
                 return LinuxErr.BADF;
@@ -105,12 +106,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
                 },
                 // For passthrough/cow/tmp, check the real filesystem via overlay
                 .passthrough, .cow, .tmp => {
-                    // Null-terminate the normalized path for kernel syscall
-                    var kern_path_buf: [513]u8 = undefined;
-                    if (h.normalized.len >= kern_path_buf.len) return LinuxErr.NAMETOOLONG;
-                    @memcpy(kern_path_buf[0..h.normalized.len], h.normalized);
-                    kern_path_buf[h.normalized.len] = 0;
-
+                    const kern_path_buf = OverlayRoot.nullTerminate(h.normalized) catch return LinuxErr.NAMETOOLONG;
                     const rc = linux.faccessat(linux.AT.FDCWD, kern_path_buf[0..h.normalized.len :0], mode, 0);
                     try checkErr(rc, "faccessat: kernel check failed for {s}", .{h.normalized});
 

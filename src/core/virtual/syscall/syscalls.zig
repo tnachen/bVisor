@@ -44,6 +44,8 @@ const sendmsg = @import("handlers/sendmsg.zig");
 const recvmsg = @import("handlers/recvmsg.zig");
 const getdents64 = @import("handlers/getdents64.zig");
 const execve_ = @import("handlers/execve.zig");
+const mkdirat = @import("handlers/mkdirat.zig");
+const unlinkat = @import("handlers/unlinkat.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -79,6 +81,8 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .sendmsg => sendmsg.handle(notif, supervisor),
         .recvmsg => recvmsg.handle(notif, supervisor),
         .getdents64 => getdents64.handle(notif, supervisor),
+        .mkdirat => mkdirat.handle(notif, supervisor),
+        .unlinkat => unlinkat.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),

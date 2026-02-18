@@ -56,10 +56,11 @@ Syscalls are intercepted and handled in userspace by the bVisor virtual kernel.
 
 | | Syscalls |
 |-|----------|
-| File I/O | `openat`, `close`, `read`, `write`, `readv`, `writev`, `lseek`, `dup`, `dup3` |
+| File I/O | `openat`, `close`, `read`, `write`, `readv`, `writev`, `lseek`, `dup`, `dup3`, `fcntl`, `ioctl`, `pipe2` |
 | File metadata | `fstat`, `fstatat64`, `faccessat` |
-| Directory | `getcwd`, `chdir`, `fchdir` |
-| Process | `getpid`, `getppid`, `gettid`, `kill`, `tkill`, `exit`, `exit_group` |
+| Directory | `getcwd`, `chdir`, `fchdir`, `getdents64`, `mkdirat`, `unlinkat` |
+| Process | `getpid`, `getppid`, `gettid`, `kill`, `tkill`, `exit`, `exit_group`, `execve` |
+| Networking | `socket`, `socketpair`, `connect`, `shutdown`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg` |
 | System info | `uname`, `sysinfo` |
 
 Note that bVisor may still call into the underlying kernel to virtualize any given syscall.
@@ -69,7 +70,7 @@ Syscalls are forwarded to the kernel unmodified. These syscalls are process-loca
 
 | | Syscalls |
 |-|----------|
-| Process | `clone`, `wait4`, `waitid` |
+| Process | `clone`, `wait4`, `waitid`, `set_tid_address` |
 | Identity | `getuid`, `geteuid`, `getgid`, `getegid` |
 | Memory | `brk`, `mmap`, `mprotect`, `munmap`, `mremap`, `madvise` |
 | Signals | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `rt_sigsuspend`, `rt_sigpending`, `rt_sigtimedwait`, `sigaltstack`, `restart_syscall` |
@@ -93,12 +94,7 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 
 | | Syscalls |
 |-|----------|
-| File I/O | `fcntl`, `ioctl`, `pipe2` |
-| File metadata | `faccessat` |
-| Directory | `getdents64`, `mkdirat`, `unlinkat` |
-| Process | `execve`, `set_tid_address` |
 | System info | `getrlimit`, `getrusage` |
-| Networking | not started |
 | Resource limits | not started (cgroups) |
 
 <details>
@@ -116,7 +112,7 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 | Memory | `msync`, `mlock`, `munlock`, `mlockall`, `munlockall`, `mincore`, `remap_file_pages`, `mbind`, `get_mempolicy`, `set_mempolicy`, `set_mempolicy_home_node`, `migrate_pages`, `move_pages`, `process_madvise`, `mlock2`, `memfd_create`, `memfd_secret`, `map_shadow_stack`, `pkey_mprotect`, `pkey_alloc`, `pkey_free`, `mseal`, `membarrier`, `process_mrelease` |
 | Signals | `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `signalfd4` |
 | Time | `clock_settime`, `clock_adjtime`, `settimeofday`, `adjtimex`, `getitimer`, `setitimer`, `times`, `timer_create`, `timer_gettime`, `timer_getoverrun`, `timer_settime`, `timer_delete`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime` |
-| Networking | `socket`, `socketpair`, `bind`, `listen`, `accept`, `accept4`, `connect`, `getsockname`, `getpeername`, `sendto`, `recvfrom`, `setsockopt`, `getsockopt`, `shutdown`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg` |
+| Networking | `getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `sendmmsg`, `recvmmsg` |
 | Polling/events | `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `epoll_pwait2`, `pselect6`, `ppoll`, `eventfd2` |
 | File sync | `sync`, `fsync`, `fdatasync`, `sync_file_range`, `syncfs` |
 | File handles | `name_to_handle_at`, `open_by_handle_at`, `openat2`, `close_range` |

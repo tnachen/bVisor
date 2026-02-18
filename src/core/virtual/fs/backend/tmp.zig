@@ -8,11 +8,8 @@ const dirent = @import("../dirent.zig");
 const builtin = @import("builtin");
 
 fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
-    var path_buf: [513]u8 = undefined;
-    if (path.len > 512) return error.NAMETOOLONG;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const rc = linux.openat(linux.AT.FDCWD, path_buf[0..path.len :0], flags, mode);
+    const buf = OverlayRoot.nullTerminate(path) catch return error.NAMETOOLONG;
+    const rc = linux.openat(linux.AT.FDCWD, buf[0..path.len :0], flags, mode);
     try checkErr(rc, "tmp.sysOpenat", .{});
     return @intCast(rc);
 }
@@ -27,6 +24,24 @@ fn sysWrite(fd: linux.fd_t, data: []const u8) !usize {
     const rc = linux.write(fd, data.ptr, data.len);
     try checkErr(rc, "tmp.sysWrite", .{});
     return rc;
+}
+
+/// Collect directory entries from a single open fd into the provided buffers.
+fn collectFromFd(
+    fd: linux.fd_t,
+    entries: *[dirent.MAX_DIR_ENTRIES]dirent.DirEntry,
+    entry_count: *usize,
+    name_storage: *[dirent.MAX_NAME_STORAGE]u8,
+    name_pos: *usize,
+) void {
+    var kernel_buf: [4096]u8 = undefined;
+    while (entry_count.* < dirent.MAX_DIR_ENTRIES and name_pos.* < dirent.MAX_NAME_STORAGE) {
+        const rc = linux.getdents64(fd, &kernel_buf, kernel_buf.len);
+        if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+        const prev_count = entry_count.*;
+        dirent.collectDirents(kernel_buf[0..rc], entries, entry_count, name_storage, name_pos);
+        if (entry_count.* == prev_count and rc > 0) break;
+    }
 }
 
 pub const Tmp = struct {
@@ -114,26 +129,63 @@ pub const Tmp = struct {
         var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
         var name_pos: usize = 0;
 
-        // Read all kernel directory entries
-        {
-            var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
-                const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
-                try checkErr(rc, "tmp.getdents64 kernel read", .{});
-                if (rc == 0) break;
-                const prev_count = entry_count;
-                dirent.collectDirents(
-                    kernel_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
-                );
-                if (entry_count == prev_count and rc > 0) break;
-            }
-        }
+        collectFromFd(self.fd, &entries, &entry_count, &name_storage, &name_pos);
 
         return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
+    }
+
+    pub fn mkdir(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        var buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(path, &buf);
+        // Ensure parent dirs exist in overlay
+        const parent = std.fs.path.dirname(resolved) orelse return;
+        const relative_parent = if (parent.len > 0 and parent[0] == '/') parent[1..] else parent;
+        if (relative_parent.len > 0) {
+            const root_dir = std.Io.Dir.cwd();
+            root_dir.createDirPath(overlay.io, relative_parent) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return error.NOENT,
+            };
+        }
+        const nt = OverlayRoot.nullTerminate(resolved) catch return error.NAMETOOLONG;
+        const rc = linux.mkdirat(linux.AT.FDCWD, nt[0..resolved.len :0], mode);
+        try checkErr(rc, "tmp.mkdir", .{});
+    }
+
+    pub fn unlink(overlay: *OverlayRoot, path: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &buf) catch return;
+        const nt = OverlayRoot.nullTerminate(resolved) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], 0);
+    }
+
+    pub fn rmdir(overlay: *OverlayRoot, path: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &buf) catch return;
+        const nt = OverlayRoot.nullTerminate(resolved) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], linux.AT.REMOVEDIR);
+    }
+
+    /// Check if a tmp directory is empty from the guest's perspective.
+    /// Reads overlay entries and filters tombstoned children.
+    pub fn isDirEmpty(overlay: *OverlayRoot, path: []const u8, tombstones: *const Tombstones) !bool {
+        var buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(path, &buf);
+        const fd = try sysOpenat(resolved, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
+        defer _ = linux.close(fd);
+
+        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
+        var name_pos: usize = 0;
+        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
+        var entry_count: usize = 0;
+
+        collectFromFd(fd, &entries, &entry_count, &name_storage, &name_pos);
+
+        for (entries[0..entry_count]) |entry| {
+            if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+            if (!tombstones.isChildTombstoned(path, entry.name)) return false;
+        }
+        return true;
     }
 
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {
