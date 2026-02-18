@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
@@ -138,6 +139,7 @@ pub const Cow = union(enum) {
     /// TODO: Could be more parsimonious with the mutex lock on this entire method.
     pub fn getdents64(
         self: *Cow,
+        allocator: Allocator,
         buf: []u8,
         dir_path: ?[]const u8,
         dirents_offset: *usize,
@@ -156,15 +158,10 @@ pub const Cow = union(enum) {
 
         const logger = Logger.init(.supervisor);
 
-        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
-        var name_pos: usize = 0;
-
-        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
-        var entry_count: usize = 0;
+        var map = dirent.DirEntryMap{};
+        defer dirent.deinitMap(allocator, &map);
 
         // Open the real directory on the host filesystem for base entries.
-        // We can't use the backing fd here because writecopy fds point to
-        // the overlay, not the real path.
         const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
             logger.log("cow.getdents64: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
             return 0;
@@ -174,45 +171,43 @@ pub const Cow = union(enum) {
         // Read all kernel directory entries from the real path
         {
             var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
+            while (true) {
                 const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
                 try checkErr(rc, "cow.getdents64 kernel read", .{});
                 if (rc == 0) break;
-                dirent.collectDirents(
+                try dirent.collectDirents(
+                    allocator,
                     kernel_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
+                    &map,
+                    false,
                 );
             }
         }
 
-        // Read overlay directory entries (if overlay cow dir exists for this path)
+        // Read overlay directory entries, skipping any names already present
         if (openOverlayDir(overlay, path)) |overlay_fd| {
             defer _ = linux.close(overlay_fd);
             var overlay_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
+            while (true) {
                 const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
                 try checkErr(rc, "cow.getdents64 overlay read", .{});
                 if (rc == 0) break;
-                dirent.collectDirentsDedup(
+                try dirent.collectDirents(
+                    allocator,
                     overlay_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
+                    &map,
+                    true,
                 );
             }
         }
 
-        if (entry_count >= dirent.MAX_DIR_ENTRIES or name_pos >= dirent.MAX_NAME_STORAGE) {
-            logger.log("cow.getdents64: capacity exceeded for {s} (entries={d}/{d}, name_bytes={d}/{d})", .{
-                path, entry_count, dirent.MAX_DIR_ENTRIES, name_pos, dirent.MAX_NAME_STORAGE,
-            });
-        }
-
-        return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
+        return dirent.serializeEntries(
+            &map,
+            buf,
+            path,
+            dirents_offset,
+            tombstones,
+        );
     }
 
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {

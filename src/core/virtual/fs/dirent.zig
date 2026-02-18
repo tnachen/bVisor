@@ -1,16 +1,11 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Tombstones = @import("../Tombstones.zig");
 
 // d_ino (u64) + d_off (i64) + d_reclen (u16) + d_type (u8)
 pub const NAME_OFFSET = 19;
 
-pub const MAX_DIR_ENTRIES = 2048;
-pub const MAX_NAME_STORAGE = 32768;
-
-pub const DirEntry = struct {
-    name: []const u8, // points into name_storage
-    d_type: u8,
-};
+pub const DirEntryMap = std.StringArrayHashMapUnmanaged(u8);
 
 /// Compute the aligned record length for a dirent with the given name length.
 pub fn recLen(name_len: usize) usize {
@@ -29,104 +24,87 @@ pub fn writeDirent(buf: []u8, ino: u64, d_off: i64, rec_len: u16, d_type: u8, na
 }
 
 /// Parse dirent64 entries from raw kernel buffer and append to the entry list.
+/// If dedup is true, existing entries are not overwritten
 pub fn collectDirents(
+    allocator: Allocator,
     raw: []const u8,
-    entries: []DirEntry,
-    count: *usize,
-    name_storage: *[MAX_NAME_STORAGE]u8,
-    name_pos: *usize,
-) void {
+    map: *DirEntryMap,
+    dedup: bool,
+) !void {
     var pos: usize = 0;
-    while (pos + NAME_OFFSET < raw.len and count.* < entries.len) {
+    while (pos + NAME_OFFSET < raw.len) {
         const rec_len_ = std.mem.readInt(u16, raw[pos + 16 ..][0..2], .little);
         if (rec_len_ < NAME_OFFSET or pos + rec_len_ > raw.len) break;
 
         const d_type = raw[pos + 18];
-        const name_end = pos + rec_len_;
-        const name_bytes = raw[pos + NAME_OFFSET .. name_end];
+        const name_bytes = raw[pos + NAME_OFFSET .. pos + rec_len_];
         const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
         const name = name_bytes[0..null_pos];
 
-        if (name_pos.* + name.len <= name_storage.len) {
-            @memcpy(name_storage[name_pos.*..][0..name.len], name);
-            entries[count.*] = .{
-                .name = name_storage[name_pos.*..][0..name.len],
-                .d_type = d_type,
-            };
-            count.* += 1;
-            name_pos.* += name.len;
+        const gop = try map.getOrPut(allocator, name);
+        if (!gop.found_existing) {
+            // Key was auto-inserted as a reference to `raw`, so dupe it
+            gop.key_ptr.* = try allocator.dupe(u8, name);
+            gop.value_ptr.* = d_type;
+        } else if (!dedup) {
+            // Overwrite d_type
+            gop.value_ptr.* = d_type;
         }
 
         pos += rec_len_;
     }
 }
 
-/// Like collectDirents, but skips entries whose name already exists in the list.
-pub fn collectDirentsDedup(
-    raw: []const u8,
-    entries: []DirEntry,
-    count: *usize,
-    name_storage: *[MAX_NAME_STORAGE]u8,
-    name_pos: *usize,
-) void {
-    var pos: usize = 0;
-    while (pos + NAME_OFFSET < raw.len and count.* < entries.len) {
-        const rec_len_ = std.mem.readInt(u16, raw[pos + 16 ..][0..2], .little);
-        if (rec_len_ < NAME_OFFSET or pos + rec_len_ > raw.len) break;
-
-        const d_type = raw[pos + 18];
-        const name_end = pos + rec_len_;
-        const name_bytes = raw[pos + NAME_OFFSET .. name_end];
-        const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
-        const name = name_bytes[0..null_pos];
-
-        if (!nameExists(entries[0..count.*], name)) {
-            if (name_pos.* + name.len <= name_storage.len) {
-                @memcpy(name_storage[name_pos.*..][0..name.len], name);
-                entries[count.*] = .{
-                    .name = name_storage[name_pos.*..][0..name.len],
-                    .d_type = d_type,
-                };
-                count.* += 1;
-                name_pos.* += name.len;
-            }
-        }
-
-        pos += rec_len_;
+/// Free all duped keys in the map.
+pub fn deinitMap(allocator: Allocator, map: *DirEntryMap) void {
+    for (map.keys()) |key| {
+        allocator.free(key);
     }
+    map.deinit(allocator);
 }
 
-fn nameExists(entries: []const DirEntry, name: []const u8) bool {
-    for (entries) |e| {
-        if (std.mem.eql(u8, e.name, name)) return true;
+/// Parse dirent names from a raw buffer (just for testing)
+pub fn parseDirentNames(buf: []const u8, out: [][]const u8) usize {
+    var count_: usize = 0;
+    var pos: usize = 0;
+    while (pos + NAME_OFFSET < buf.len and count_ < out.len) {
+        const rec_len = std.mem.readInt(u16, buf[pos + 16 ..][0..2], .little);
+        if (rec_len < NAME_OFFSET or pos + rec_len > buf.len) break;
+        const name_bytes = buf[pos + NAME_OFFSET .. pos + rec_len];
+        const null_pos = std.mem.indexOfScalar(u8, name_bytes, 0) orelse name_bytes.len;
+        out[count_] = name_bytes[0..null_pos];
+        count_ += 1;
+        pos += rec_len;
     }
-    return false;
+    return count_;
 }
 
 /// Serialize directory entries into a buffer, filtering tombstoned and already-returned entries.
 pub fn serializeEntries(
-    entries: []const DirEntry,
+    map: *const DirEntryMap,
     buf: []u8,
     dir_path: []const u8,
     dirents_offset: *usize,
     tombstones: *const Tombstones,
 ) usize {
     var buf_pos: usize = 0;
+    const keys = map.keys();
+    const values = map.values();
     var entry_idx: usize = 0;
 
-    for (entries) |entry| {
+    for (keys, values) |name, d_type| {
         if (entry_idx < dirents_offset.*) {
             entry_idx += 1;
             continue;
         }
 
-        if (!std.mem.eql(u8, entry.name, ".") and !std.mem.eql(u8, entry.name, "..") and tombstones.isChildTombstoned(dir_path, entry.name)) {
+        if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..") and tombstones.isChildTombstoned(dir_path, name)) {
             entry_idx += 1;
             dirents_offset.* += 1;
             continue;
         }
 
-        const rec_len_ = recLen(entry.name.len);
+        const rec_len_ = recLen(name.len);
         if (buf_pos + rec_len_ > buf.len) break;
 
         writeDirent(
@@ -134,8 +112,8 @@ pub fn serializeEntries(
             entry_idx + 1,
             @intCast(entry_idx + 1),
             @intCast(rec_len_),
-            entry.d_type,
-            entry.name,
+            d_type,
+            name,
         );
 
         buf_pos += rec_len_;

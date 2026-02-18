@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
@@ -95,6 +96,7 @@ pub const Tmp = struct {
 
     pub fn getdents64(
         self: *Tmp,
+        allocator: Allocator,
         buf: []u8,
         dir_path: ?[]const u8,
         dirents_offset: *usize,
@@ -109,31 +111,34 @@ pub const Tmp = struct {
         // Reset kernel FD's offset so we always read the full directory
         _ = linux.lseek(self.fd, 0, linux.SEEK.SET);
 
-        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
-        var entry_count: usize = 0;
-        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
-        var name_pos: usize = 0;
+        var map = dirent.DirEntryMap{};
+        defer dirent.deinitMap(allocator, &map);
 
         // Read all kernel directory entries
         {
             var kernel_buf: [4096]u8 = undefined;
-            while (entry_count < dirent.MAX_DIR_ENTRIES and name_pos < dirent.MAX_NAME_STORAGE) {
+            while (true) {
                 const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
                 try checkErr(rc, "tmp.getdents64 kernel read", .{});
                 if (rc == 0) break;
-                const prev_count = entry_count;
-                dirent.collectDirents(
+                const prev_count = map.count();
+                try dirent.collectDirents(
+                    allocator,
                     kernel_buf[0..rc],
-                    &entries,
-                    &entry_count,
-                    &name_storage,
-                    &name_pos,
+                    &map,
+                    false,
                 );
-                if (entry_count == prev_count and rc > 0) break;
+                if (map.count() == prev_count and rc > 0) break;
             }
         }
 
-        return dirent.serializeEntries(entries[0..entry_count], buf, path, dirents_offset, tombstones);
+        return dirent.serializeEntries(
+            &map,
+            buf,
+            path,
+            dirents_offset,
+            tombstones,
+        );
     }
 
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {

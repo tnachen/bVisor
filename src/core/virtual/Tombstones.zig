@@ -2,9 +2,7 @@ const std = @import("std");
 
 const Self = @This();
 
-pub const Kind = enum { file, dir };
-
-map: std.StringHashMapUnmanaged(Kind),
+map: std.StringHashMapUnmanaged(void),
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator) Self {
@@ -23,14 +21,12 @@ pub fn deinit(self: *Self) void {
 }
 
 /// Record a path as deleted.
-/// Use `.dir` for directories to recursively tombstone all contents.
-pub fn add(self: *Self, path: []const u8, kind: Kind) !void {
+pub fn add(self: *Self, path: []const u8) !void {
     const gop = try self.map.getOrPut(self.allocator, path);
     if (!gop.found_existing) {
         errdefer _ = self.map.remove(path);
         gop.key_ptr.* = try self.allocator.dupe(u8, path);
     }
-    gop.value_ptr.* = kind;
 }
 
 /// Remove a tombstone (e.g., when a file is recreated via O_CREAT).
@@ -40,22 +36,8 @@ pub fn remove(self: *Self, path: []const u8) void {
     }
 }
 
-/// Check if a path is tombstoned, either directly or via an ancestor dir tombstone.
 pub fn isTombstoned(self: *const Self, path: []const u8) bool {
-    if (self.map.get(path) != null) return true;
-
-    // Walk ancestors: if any ancestor directory is tombstoned, this path is too
-    var end: usize = path.len;
-    while (end > 0) {
-        end -= 1;
-        if (path[end] == '/') {
-            const ancestor = if (end == 0) "/" else path[0..end];
-            if (self.map.get(ancestor)) |kind| {
-                if (kind == .dir) return true;
-            }
-        }
-    }
-    return false;
+    return self.map.contains(path);
 }
 
 /// Check if a direct child of `dir_path` is tombstoned.
@@ -79,27 +61,25 @@ test "empty tombstones: nothing is tombstoned" {
     try testing.expect(!ts.isTombstoned("/tmp/foo"));
 }
 
-test "add file tombstone: exact path is tombstoned" {
+test "add tombstone: exact path is tombstoned" {
     var ts = Self.init(testing.allocator);
     defer ts.deinit();
 
-    try ts.add("/etc/passwd", .file);
+    try ts.add("/etc/passwd");
 
     try testing.expect(ts.isTombstoned("/etc/passwd"));
     try testing.expect(!ts.isTombstoned("/etc/shadow"));
     try testing.expect(!ts.isTombstoned("/etc"));
 }
 
-test "add dir tombstone: children are recursively tombstoned" {
+test "tombstone does not affect children or parents" {
     var ts = Self.init(testing.allocator);
     defer ts.deinit();
 
-    try ts.add("/usr/local", .dir);
+    try ts.add("/usr/local");
 
     try testing.expect(ts.isTombstoned("/usr/local"));
-    try testing.expect(ts.isTombstoned("/usr/local/bin"));
-    try testing.expect(ts.isTombstoned("/usr/local/bin/python"));
-    try testing.expect(!ts.isTombstoned("/usr/bin"));
+    try testing.expect(!ts.isTombstoned("/usr/local/bin"));
     try testing.expect(!ts.isTombstoned("/usr"));
 }
 
@@ -107,7 +87,7 @@ test "remove tombstone: path is no longer tombstoned" {
     var ts = Self.init(testing.allocator);
     defer ts.deinit();
 
-    try ts.add("/etc/passwd", .file);
+    try ts.add("/etc/passwd");
     try testing.expect(ts.isTombstoned("/etc/passwd"));
 
     ts.remove("/etc/passwd");
@@ -121,76 +101,38 @@ test "remove non-existent tombstone is no-op" {
     ts.remove("/nonexistent");
 }
 
-test "dir tombstone: removing parent unblocks children" {
-    var ts = Self.init(testing.allocator);
-    defer ts.deinit();
-
-    try ts.add("/usr", .dir);
-    try testing.expect(ts.isTombstoned("/usr/bin/ls"));
-
-    ts.remove("/usr");
-    try testing.expect(!ts.isTombstoned("/usr/bin/ls"));
-}
-
-test "file tombstone does not affect children" {
-    var ts = Self.init(testing.allocator);
-    defer ts.deinit();
-
-    try ts.add("/etc", .file);
-
-    try testing.expect(ts.isTombstoned("/etc"));
-    try testing.expect(!ts.isTombstoned("/etc/passwd"));
-}
-
-test "upgrade file tombstone to dir" {
-    var ts = Self.init(testing.allocator);
-    defer ts.deinit();
-
-    try ts.add("/usr", .file);
-    try testing.expect(!ts.isTombstoned("/usr/bin"));
-
-    try ts.add("/usr", .dir);
-    try testing.expect(ts.isTombstoned("/usr/bin"));
-}
-
 test "isChildTombstoned checks direct children" {
     var ts = Self.init(testing.allocator);
     defer ts.deinit();
 
-    try ts.add("/etc/passwd", .file);
+    try ts.add("/etc/passwd");
 
     try testing.expect(ts.isChildTombstoned("/etc", "passwd"));
     try testing.expect(!ts.isChildTombstoned("/etc", "shadow"));
-}
-
-test "isChildTombstoned respects dir tombstones" {
-    var ts = Self.init(testing.allocator);
-    defer ts.deinit();
-
-    try ts.add("/usr/local", .dir);
-
-    try testing.expect(ts.isChildTombstoned("/usr", "local"));
-    try testing.expect(!ts.isChildTombstoned("/usr", "bin"));
-}
-
-test "root dir tombstone blocks everything" {
-    var ts = Self.init(testing.allocator);
-    defer ts.deinit();
-
-    try ts.add("/", .dir);
-    try testing.expect(ts.isTombstoned("/anything"));
-    try testing.expect(ts.isTombstoned("/deep/nested/path"));
 }
 
 test "multiple tombstones coexist" {
     var ts = Self.init(testing.allocator);
     defer ts.deinit();
 
-    try ts.add("/etc/passwd", .file);
-    try ts.add("/var/log", .dir);
+    try ts.add("/etc/passwd");
+    try ts.add("/var/log");
 
     try testing.expect(ts.isTombstoned("/etc/passwd"));
-    try testing.expect(ts.isTombstoned("/var/log/syslog"));
+    try testing.expect(ts.isTombstoned("/var/log"));
     try testing.expect(!ts.isTombstoned("/etc/shadow"));
     try testing.expect(!ts.isTombstoned("/var/run"));
+}
+
+test "re-adding same path is idempotent" {
+    var ts = Self.init(testing.allocator);
+    defer ts.deinit();
+
+    try ts.add("/etc/passwd");
+    try ts.add("/etc/passwd");
+
+    try testing.expect(ts.isTombstoned("/etc/passwd"));
+
+    ts.remove("/etc/passwd");
+    try testing.expect(!ts.isTombstoned("/etc/passwd"));
 }
