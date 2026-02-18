@@ -61,7 +61,7 @@ pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, in
         .logger = logger,
         .guest_threads = guest_threads,
         .overlay = overlay,
-        .symlinks = Symlinks.init(),
+        .symlinks = Symlinks.init(allocator, io),
     };
 }
 

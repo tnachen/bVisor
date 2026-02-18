@@ -102,11 +102,7 @@ fn execViaSymlink(
     logger.log("execve: symlink {s} -> {s}", .{ symlink_path, kernel_path });
     try memory_bridge.writeString(symlink_path, caller_tid, path_ptr);
 
-    const resp = replyContinue(notif_id);
-
-    _ = linux.unlinkat(linux.AT.FDCWD, symlink_buf[0..Symlinks.path_len :0], 0);
-
-    return resp;
+    return replyContinue(notif_id);
 }
 
 const testing = std.testing;

@@ -1,6 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
+const Io = std.Io;
 const checkErr = @import("../linux_error.zig").checkErr;
+
+const Allocator = std.mem.Allocator;
 
 const Self = @This();
 
@@ -12,15 +15,28 @@ pub const max_entries: u32 = charset_len * charset_len * charset_len; // 50,653
 pub const path_len = dir.len + 1 + code_len; // "/.b/" + "XXX" = 7
 
 counter: std.atomic.Value(u32),
+created: std.ArrayListUnmanaged(u32),
+allocator: Allocator,
+io: Io,
+list_mutex: Io.Mutex,
 
-pub fn init() Self {
+pub fn init(allocator: Allocator, io: Io) Self {
     return .{
         .counter = std.atomic.Value(u32).init(0),
+        .created = .empty,
+        .allocator = allocator,
+        .io = io,
+        .list_mutex = .init,
     };
 }
 
-pub fn deinit(_: *Self) void {
-    // Remove /.b if empty (succeeds only if no other sandbox is using it)
+pub fn deinit(self: *Self) void {
+    var buf: [path_len + 1]u8 = undefined;
+    for (self.created.items) |idx| {
+        _ = formatPath(idx, &buf);
+        _ = linux.unlinkat(linux.AT.FDCWD, buf[0..path_len :0], 0);
+    }
+    self.created.deinit(self.allocator);
     _ = linux.unlinkat(linux.AT.FDCWD, dir, linux.AT.REMOVEDIR);
 }
 
@@ -62,7 +78,8 @@ pub fn create(self: *Self, target: []const u8, original_path_len: usize, out_buf
     @memcpy(target_buf[0..target.len], target);
     target_buf[target.len] = 0;
 
-    while (true) {
+    const max_probes = 20;
+    for (0..max_probes) |_| {
         const idx = self.counter.fetchAdd(1, .monotonic) % max_entries;
 
         _ = formatPath(idx, out_buf);
@@ -77,8 +94,13 @@ pub fn create(self: *Self, target: []const u8, original_path_len: usize, out_buf
             return err;
         };
 
+        self.list_mutex.lockUncancelable(self.io);
+        defer self.list_mutex.unlock(self.io);
+        self.created.append(self.allocator, idx) catch {};
+
         return out_buf[0..path_len];
     }
+    return error.NOSPC;
 }
 
 const testing = std.testing;
@@ -105,7 +127,7 @@ test "formatPath produces /.b/XXX" {
 }
 
 test "create returns EPERM when original path shorter than 7" {
-    var s = Self.init();
+    var s = Self.init(testing.allocator, testing.io);
     defer s.deinit();
 
     var buf: [path_len + 1]u8 = undefined;
@@ -113,20 +135,18 @@ test "create returns EPERM when original path shorter than 7" {
 }
 
 test "create skips EEXIST and advances to next slot" {
-    var s1 = Self.init();
+    var s1 = Self.init(testing.allocator, testing.io);
     defer s1.deinit();
-    var s2 = Self.init();
+    var s2 = Self.init(testing.allocator, testing.io);
     defer s2.deinit();
 
     // s1 claims slot 0
     var buf1: [path_len + 1]u8 = undefined;
     const p1 = try s1.create("/bin/sh", 256, &buf1);
-    defer _ = linux.unlinkat(linux.AT.FDCWD, buf1[0..path_len :0], 0);
     try testing.expectEqualStrings("/.b/000", p1);
 
     // s2 also starts at 0, hits EEXIST, advances to 1
     var buf2: [path_len + 1]u8 = undefined;
     const p2 = try s2.create("/bin/sh", 256, &buf2);
-    defer _ = linux.unlinkat(linux.AT.FDCWD, buf2[0..path_len :0], 0);
     try testing.expectEqualStrings("/.b/001", p2);
 }
