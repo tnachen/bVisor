@@ -9,7 +9,11 @@ const syscalls = @import("virtual/syscall/syscalls.zig");
 const Logger = types.Logger;
 const Threads = @import("virtual/proc/Threads.zig");
 const OverlayRoot = @import("virtual/OverlayRoot.zig");
+<<<<<<< HEAD
 const Tombstones = @import("virtual/Tombstones.zig");
+=======
+const Symlinks = @import("virtual/Symlinks.zig");
+>>>>>>> main
 const LogBuffer = @import("LogBuffer.zig");
 const Allocator = std.mem.Allocator;
 
@@ -36,6 +40,9 @@ overlay: OverlayRoot,
 // Tracks deleted paths within the sandbox (files and directories)
 tombstones: Tombstones,
 
+// Short symlinks at /.b/ for execve path rewriting (points into overlay)
+symlinks: Symlinks,
+
 // Log buffers for stdout/stderr
 // Owned by the runCmd invocation in SDK
 stdout: *LogBuffer,
@@ -61,7 +68,11 @@ pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, in
         .logger = logger,
         .guest_threads = guest_threads,
         .overlay = overlay,
+<<<<<<< HEAD
         .tombstones = Tombstones.init(allocator),
+=======
+        .symlinks = Symlinks.init(allocator, io),
+>>>>>>> main
     };
 }
 
@@ -69,6 +80,7 @@ pub fn deinit(self: *Self) void {
     if (self.notify_fd >= 0) {
         _ = linux.close(self.notify_fd);
     }
+    self.symlinks.deinit();
     self.guest_threads.deinit();
     self.tombstones.deinit();
     self.overlay.deinit();
