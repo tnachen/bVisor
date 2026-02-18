@@ -37,7 +37,6 @@ pub fn deinit(self: *Self) void {
         _ = linux.unlinkat(linux.AT.FDCWD, buf[0..path_len :0], 0);
     }
     self.created.deinit(self.allocator);
-    _ = linux.unlinkat(linux.AT.FDCWD, dir, linux.AT.REMOVEDIR);
 }
 
 fn ensureDir() void {
