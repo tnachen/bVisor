@@ -1,7 +1,11 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
+const Tombstones = @import("../../Tombstones.zig");
+const dirent = @import("../dirent.zig");
+const Logger = @import("../../../types.zig").Logger;
 
 const BackingFD = linux.fd_t;
 
@@ -129,6 +133,83 @@ pub const Cow = union(enum) {
         return @intCast(rc);
     }
 
+    /// Merged directory listing for COW directories.
+    /// Reads entries from the kernel, adds overlay-only entries, filters tombstones.
+    /// When dir_path is null, falls back to simple kernel forwarding.
+    /// TODO: Could be more parsimonious with the mutex lock on this entire method.
+    pub fn getdents64(
+        self: *Cow,
+        allocator: Allocator,
+        buf: []u8,
+        dir_path: ?[]const u8,
+        dirents_offset: *usize,
+        overlay: *OverlayRoot,
+        tombstones: *const Tombstones,
+    ) !usize {
+        const fd = switch (self.*) {
+            inline else => |backing_fd| backing_fd,
+        };
+
+        const path = dir_path orelse {
+            const rc = linux.getdents64(fd, buf.ptr, buf.len);
+            try checkErr(rc, "cow.getdents64", .{});
+            return rc;
+        };
+
+        const logger = Logger.init(.supervisor);
+
+        var map = dirent.DirEntryMap{};
+        defer dirent.deinitMap(allocator, &map);
+
+        // Open the real directory on the host filesystem for base entries.
+        const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
+            logger.log("cow.getdents64: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
+            return 0;
+        };
+        defer _ = linux.close(real_fd);
+
+        // Read all kernel directory entries from the real path
+        {
+            var kernel_buf: [4096]u8 = undefined;
+            while (true) {
+                const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
+                try checkErr(rc, "cow.getdents64 kernel read", .{});
+                if (rc == 0) break;
+                try dirent.collectDirents(
+                    allocator,
+                    kernel_buf[0..rc],
+                    &map,
+                    false,
+                );
+            }
+        }
+
+        // Read overlay directory entries, skipping any names already present
+        if (openOverlayDir(overlay, path)) |overlay_fd| {
+            defer _ = linux.close(overlay_fd);
+            var overlay_buf: [4096]u8 = undefined;
+            while (true) {
+                const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
+                try checkErr(rc, "cow.getdents64 overlay read", .{});
+                if (rc == 0) break;
+                try dirent.collectDirents(
+                    allocator,
+                    overlay_buf[0..rc],
+                    &map,
+                    true,
+                );
+            }
+        }
+
+        return dirent.serializeEntries(
+            &map,
+            buf,
+            path,
+            dirents_offset,
+            tombstones,
+        );
+    }
+
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
         const fd = switch (self.*) {
             inline else => |fd| fd,
@@ -158,6 +239,27 @@ pub const Cow = union(enum) {
         return error.NOTSOCK;
     }
 };
+
+/// Try to open the overlay cow directory for the given guest path.
+/// Returns null if the overlay directory doesn't exist.
+fn openOverlayDir(overlay: *OverlayRoot, dir_path: []const u8) ?linux.fd_t {
+    var cow_path_buf: [512]u8 = undefined;
+    const cow_dir_path = overlay.resolveCow(dir_path, &cow_path_buf) catch return null;
+
+    var path_buf: [513]u8 = undefined;
+    if (cow_dir_path.len > 512) return null;
+    @memcpy(path_buf[0..cow_dir_path.len], cow_dir_path);
+    path_buf[cow_dir_path.len] = 0;
+
+    const rc = linux.openat(
+        linux.AT.FDCWD,
+        path_buf[0..cow_dir_path.len :0],
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) return null;
+    return @intCast(rc);
+}
 
 /// Copy a file from src to dst
 fn copyFile(src: []const u8, dst: []const u8) !void {

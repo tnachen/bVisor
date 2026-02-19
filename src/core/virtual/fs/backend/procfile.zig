@@ -1,8 +1,10 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const Thread = @import("../../proc/Thread.zig");
 const NsTgid = Thread.NsTgid;
 const Namespace = @import("../../proc/Namespace.zig");
+const dirent = @import("../dirent.zig");
 
 /// Procfile handles all internals of /proc/<nstgid_or_self>/...
 /// The trick is that the content is generated at opentime
@@ -11,30 +13,33 @@ pub const ProcFile = struct {
     content: [256]u8,
     content_len: usize,
     offset: usize,
+    is_dir: bool = false,
 
     pub const ProcTarget = union(enum) {
-        self_nstgid,
+        dir_proc,
+        dir_pid_self,
+        dir_pid: NsTgid,
         self_status,
-        nstgid: NsTgid,
         nstgid_status: NsTgid,
     };
 
     pub fn parseProcPath(path: []const u8) !ProcTarget {
-        // path comes in as the full path e.g. "/proc/self" or "/proc/123/status"
+        if (std.mem.eql(u8, path, "/proc")) return .dir_proc;
+
         const prefix = "/proc/";
         if (!std.mem.startsWith(u8, path, prefix)) return error.NOENT;
         const remainder = path[prefix.len..];
-        if (remainder.len == 0) return error.NOENT;
+        if (remainder.len == 0) return .dir_proc;
 
-        // /proc/self or /proc/self/status
+        // /proc/self (directory) or /proc/self/status (file)
         if (std.mem.startsWith(u8, remainder, "self")) {
             const after_self = remainder["self".len..];
-            if (after_self.len == 0) return .self_nstgid;
+            if (after_self.len == 0) return .dir_pid_self;
             if (std.mem.eql(u8, after_self, "/status")) return .self_status;
             return error.NOENT;
         }
 
-        // /proc/<N> or /proc/<N>/status
+        // /proc/<N> (directory) or /proc/<N>/status (file)
         const slash_pos = std.mem.indexOfScalar(u8, remainder, '/');
         const nstgid_str = if (slash_pos) |pos| remainder[0..pos] else remainder;
 
@@ -47,7 +52,7 @@ pub const ProcFile = struct {
             return error.NOENT;
         }
 
-        return .{ .nstgid = nstgid };
+        return .{ .dir_pid = nstgid };
     }
 
     pub fn open(caller: *Thread, path: []const u8) !ProcFile {
@@ -60,23 +65,17 @@ pub const ProcFile = struct {
         };
 
         switch (target) {
-            .self_nstgid => {
-                const leader = try caller.thread_group.getLeader();
-                const nstgid = caller.namespace.getNsTid(leader) orelse return error.NOENT;
-                self.content_len = formatPid(&self.content, nstgid);
+            .dir_proc, .dir_pid_self => {
+                self.is_dir = true;
+            },
+            .dir_pid => |nstgid| {
+                _ = caller.namespace.threads.get(nstgid) orelse return error.NOENT;
+                self.is_dir = true;
             },
             .self_status => {
                 self.content_len = try formatStatus(&self.content, caller);
             },
-            .nstgid => |nstgid| {
-                // Note: this depends on syncNewThreads being called proactively, else risk a not-registered NsTgid.
-                // This syncNewThreads is called one level up, in openat.
-                const target_thread = caller.namespace.threads.get(nstgid) orelse return error.NOENT;
-                _ = target_thread;
-                self.content_len = formatPid(&self.content, nstgid);
-            },
             .nstgid_status => |nstgid| {
-                // Same case as above re: syncNewThreads
                 const target_thread = caller.namespace.threads.get(nstgid) orelse return error.NOENT;
                 self.content_len = try formatStatus(&self.content, target_thread);
             },
@@ -85,25 +84,87 @@ pub const ProcFile = struct {
         return self;
     }
 
-    fn formatPid(buf: *[256]u8, nstgid: i32) usize {
-        const slice = std.fmt.bufPrint(buf, "{d}\n", .{nstgid}) catch unreachable;
-        return slice.len;
-    }
-
     fn formatStatus(buf: *[256]u8, target: *Thread) !usize {
-        const leader = try target.thread_group.getLeader();
-        const nstgid = target.namespace.getNsTid(leader) orelse 0;
-
-        const nsptgid: NsTgid = if (target.thread_group.parent) |parent_process| blk: {
-            const parent = try parent_process.getLeader();
-            break :blk target.namespace.getNsTid(parent) orelse 0;
-        } else 0;
+        const nstgid = try target.getNsTgid(target.namespace) orelse 0;
+        const nsptgid = try target.getNsPTgid(target.namespace) orelse 0;
 
         // TODO: support more status content lookup, this isn't 100% compatible
         // We also use the same name for everything
         const name = "bvisor-guest";
         const slice = std.fmt.bufPrint(buf, "Name:\t{s}\nPid:\t{d}\nPPid:\t{d}\n", .{ name, nstgid, nsptgid }) catch unreachable;
         return slice.len;
+    }
+
+    /// Synthesize linux_dirent64 entries for a /proc directory listing.
+    /// `caller` is needed to enumerate visible PIDs from the caller's namespace.
+    /// `opened_path` distinguishes /proc (list PIDs) from /proc/<pid> (list subfiles).
+    pub fn getdents64(
+        _: *ProcFile,
+        allocator: Allocator,
+        buf: []u8,
+        caller: *Thread,
+        opened_path: []const u8,
+        dirents_offset: *usize,
+    ) !usize {
+        var names_buf: [64][]const u8 = undefined;
+        var num_fmt_buf: [64][16]u8 = undefined;
+        var name_count: usize = 0;
+
+        names_buf[name_count] = ".";
+        name_count += 1;
+        names_buf[name_count] = "..";
+        name_count += 1;
+
+        if (std.mem.eql(u8, opened_path, "/proc")) {
+            names_buf[name_count] = "self";
+            name_count += 1;
+
+            var tgid_set = try caller.namespace.getNamespacedThreadGroupIds(allocator);
+            defer tgid_set.deinit(allocator);
+
+            var pid_idx: usize = 0;
+            for (tgid_set.keys()) |nstgid| {
+                if (name_count >= names_buf.len or pid_idx >= num_fmt_buf.len) break;
+                const slice = std.fmt.bufPrint(&num_fmt_buf[pid_idx], "{d}", .{nstgid}) catch continue;
+                names_buf[name_count] = slice;
+                name_count += 1;
+                pid_idx += 1;
+            }
+        } else {
+            // /proc/<pid> or /proc/self — list known subfiles
+            // TODO: expand as more /proc/<pid>/* files are virtualized
+            names_buf[name_count] = "status";
+            name_count += 1;
+        }
+
+        var buf_pos: usize = 0;
+        var entry_idx: usize = 0;
+
+        for (names_buf[0..name_count]) |name| {
+            if (entry_idx < dirents_offset.*) {
+                entry_idx += 1;
+                continue;
+            }
+
+            const rec_len = dirent.recLen(name.len);
+            if (buf_pos + rec_len > buf.len) break;
+
+            const d_type: u8 = if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
+                linux.DT.DIR
+            else if (std.mem.eql(u8, name, "self"))
+                linux.DT.LNK
+            else if (std.mem.eql(u8, name, "status"))
+                linux.DT.REG
+            else
+                linux.DT.DIR; // numeric PID entries are directories
+
+            dirent.writeDirent(buf[buf_pos..], entry_idx + 1, @intCast(entry_idx + 1), @intCast(rec_len), d_type, name);
+            buf_pos += rec_len;
+            entry_idx += 1;
+            dirents_offset.* += 1;
+        }
+
+        return buf_pos;
     }
 
     pub fn read(self: *ProcFile, buf: []u8) !usize {
@@ -135,9 +196,15 @@ pub const ProcFile = struct {
             .SIZE = true,
         };
 
-        statx_buf.mode = linux.S.IFREG | 0o444; // regular file, read only
-        statx_buf.nlink = 1;
-        statx_buf.size = self.content_len;
+        if (self.is_dir) {
+            statx_buf.mode = linux.S.IFDIR | 0o555;
+            statx_buf.nlink = 2;
+            statx_buf.size = 0;
+        } else {
+            statx_buf.mode = linux.S.IFREG | 0o444;
+            statx_buf.nlink = 1;
+            statx_buf.size = self.content_len;
+        }
 
         statx_buf.blksize = 4096; // doesn't require a mask bit because none exists
 
@@ -203,7 +270,7 @@ const proc_info = @import("../../../utils/proc_info.zig");
 
 test "parseProcPath - /proc/self" {
     const target = try ProcFile.parseProcPath("/proc/self");
-    try testing.expect(target == .self_nstgid);
+    try testing.expect(target == .dir_pid_self);
 }
 
 test "parseProcPath - /proc/self/status" {
@@ -213,7 +280,7 @@ test "parseProcPath - /proc/self/status" {
 
 test "parseProcPath - /proc/123" {
     const target = try ProcFile.parseProcPath("/proc/123");
-    try testing.expectEqual(ProcFile.ProcTarget{ .nstgid = 123 }, target);
+    try testing.expectEqual(ProcFile.ProcTarget{ .dir_pid = 123 }, target);
 }
 
 test "parseProcPath - /proc/123/status" {
@@ -221,8 +288,9 @@ test "parseProcPath - /proc/123/status" {
     try testing.expectEqual(ProcFile.ProcTarget{ .nstgid_status = 123 }, target);
 }
 
-test "parseProcPath - /proc/ alone is invalid" {
-    try testing.expectError(error.NOENT, ProcFile.parseProcPath("/proc/"));
+test "parseProcPath - /proc/ resolves to dir_proc" {
+    const target = try ProcFile.parseProcPath("/proc/");
+    try testing.expect(target == .dir_proc);
 }
 
 test "parseProcPath - /proc/self/bogus is invalid" {
@@ -241,7 +309,7 @@ test "parseProcPath - /wrong/prefix is invalid" {
     try testing.expectError(error.NOENT, ProcFile.parseProcPath("/wrong/self"));
 }
 
-test "open /proc/self returns guest nstgid" {
+test "open /proc/self opens as directory" {
     const allocator = testing.allocator;
     var v_threads = Threads.init(allocator);
     defer v_threads.deinit();
@@ -250,10 +318,10 @@ test "open /proc/self returns guest nstgid" {
     const proc = v_threads.lookup.get(100).?;
 
     var file = try ProcFile.open(proc, "/proc/self");
+    try testing.expect(file.is_dir);
     var buf: [64]u8 = undefined;
     const n = try file.read(&buf);
-    // Root Thread NsTgid is 100 (the AbsTgid used as NsTgid in root namespace)
-    try testing.expectEqualStrings("100\n", buf[0..n]);
+    try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "open /proc/self/status contains Pid and PPid" {
@@ -279,7 +347,7 @@ test "open /proc/self/status contains Pid and PPid" {
     try testing.expect(std.mem.indexOf(u8, content, "Name:\tbvisor-guest\n") != null);
 }
 
-test "open /proc/<N> returns pid for visible Thread" {
+test "open /proc/<N> opens as directory for visible Thread" {
     const allocator = testing.allocator;
     var v_threads = Threads.init(allocator);
     defer v_threads.deinit();
@@ -288,11 +356,11 @@ test "open /proc/<N> returns pid for visible Thread" {
     const root = v_threads.lookup.get(100).?;
     _ = try v_threads.registerChild(root, 200, Threads.CloneFlags.from(0));
 
-    // Root can see child at NsTgid 200
     var file = try ProcFile.open(root, "/proc/200");
+    try testing.expect(file.is_dir);
     var buf: [64]u8 = undefined;
     const n = try file.read(&buf);
-    try testing.expectEqualStrings("200\n", buf[0..n]);
+    try testing.expectEqual(@as(usize, 0), n);
 }
 
 test "open /proc/<N> returns error for non-existent pid" {
@@ -339,7 +407,7 @@ test "write returns ReadOnlyFileSystem" {
     try v_threads.handleInitialThread(100);
     const proc = v_threads.lookup.get(100).?;
 
-    var file = try ProcFile.open(proc, "/proc/self");
+    var file = try ProcFile.open(proc, "/proc/self/status");
     try testing.expectError(error.ROFS, file.write("test"));
 }
 
@@ -351,7 +419,7 @@ test "parseProcPath - /proc/-1 (negative) is invalid" {
     try testing.expectError(error.NOENT, ProcFile.parseProcPath("/proc/-1"));
 }
 
-test "child in new namespace (CLONE_NEWPID) /proc/self returns 1" {
+test "child in new namespace (CLONE_NEWPID) /proc/self opens as directory" {
     const allocator = testing.allocator;
     var v_threads = Threads.init(allocator);
     defer v_threads.deinit();
@@ -360,16 +428,13 @@ test "child in new namespace (CLONE_NEWPID) /proc/self returns 1" {
     try v_threads.handleInitialThread(100);
     const root = v_threads.lookup.get(100).?;
 
-    // Child in new namespace gets NsTgid 1
     const nstids = [_]NsTgid{ 200, 1 };
     try proc_info.mock.setupNsTids(allocator, 200, &nstids);
     _ = try v_threads.registerChild(root, 200, Threads.CloneFlags.from(std.os.linux.CLONE.NEWPID));
     const child = v_threads.lookup.get(200).?;
 
     var file = try ProcFile.open(child, "/proc/self");
-    var buf: [64]u8 = undefined;
-    const n = try file.read(&buf);
-    try testing.expectEqualStrings("1\n", buf[0..n]);
+    try testing.expect(file.is_dir);
 }
 
 test "open /proc/self/status - child with parent invisible (new namespace) has PPid 0" {
@@ -441,11 +506,10 @@ test "read past end returns 0 (EOF)" {
     try v_threads.handleInitialThread(100);
     const proc = v_threads.lookup.get(100).?;
 
-    var file = try ProcFile.open(proc, "/proc/self");
-    // Content is "100\n" (4 bytes)
+    var file = try ProcFile.open(proc, "/proc/self/status");
 
     // Read all content
-    var buf: [64]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const n = try file.read(&buf);
     try testing.expect(n > 0);
 
@@ -462,20 +526,14 @@ test "read with 1-byte buffer walks through content" {
     try v_threads.handleInitialThread(5);
     const proc = v_threads.lookup.get(5).?;
 
-    var file = try ProcFile.open(proc, "/proc/self");
-    // Content is "5\n" (2 bytes)
+    // Use /proc/self/status which has file content
+    var file = try ProcFile.open(proc, "/proc/self/status");
+    // Content starts with "Name:\tbvisor-guest\n"
 
     var byte_buf: [1]u8 = undefined;
-    var n = try file.read(&byte_buf);
+    const n = try file.read(&byte_buf);
     try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqual(@as(u8, '5'), byte_buf[0]);
-
-    n = try file.read(&byte_buf);
-    try testing.expectEqual(@as(usize, 1), n);
-    try testing.expectEqual(@as(u8, '\n'), byte_buf[0]);
-
-    n = try file.read(&byte_buf);
-    try testing.expectEqual(@as(usize, 0), n);
+    try testing.expectEqual(@as(u8, 'N'), byte_buf[0]);
 }
 
 test "close is no-op" {
@@ -486,9 +544,8 @@ test "close is no-op" {
     try v_threads.handleInitialThread(100);
     const proc = v_threads.lookup.get(100).?;
 
-    var file = try ProcFile.open(proc, "/proc/self");
+    var file = try ProcFile.open(proc, "/proc/self/status");
     file.close();
-    // No error = success
 }
 
 test "content frozen at open time (snapshot semantics)" {
@@ -499,17 +556,17 @@ test "content frozen at open time (snapshot semantics)" {
     try v_threads.handleInitialThread(100);
     const root = v_threads.lookup.get(100).?;
 
-    // Open /proc/self/status for root (should show child count context)
-    var file = try ProcFile.open(root, "/proc/self");
-    // Content is "100\n" captured at open time
+    // Open /proc/self/status — content captured at open time
+    var file = try ProcFile.open(root, "/proc/self/status");
 
     // Now add a child - this shouldn't affect the already-opened file
     _ = try v_threads.registerChild(root, 200, Threads.CloneFlags.from(0));
 
     // Read from the already-opened file - should still show original content
-    var buf: [64]u8 = undefined;
+    var buf: [256]u8 = undefined;
     const n = try file.read(&buf);
-    try testing.expectEqualStrings("100\n", buf[0..n]);
+    const content = buf[0..n];
+    try testing.expect(std.mem.indexOf(u8, content, "Pid:\t100\n") != null);
 }
 
 test "offset tracking works across multiple reads" {
@@ -520,20 +577,16 @@ test "offset tracking works across multiple reads" {
     try v_threads.handleInitialThread(100);
     const proc = v_threads.lookup.get(100).?;
 
-    var file = try ProcFile.open(proc, "/proc/self");
-    // Content is "100\n" (4 bytes)
+    // Use /proc/self/status which produces "Name:\tbvisor-guest\nPid:\t100\nPPid:\t0\n"
+    var file = try ProcFile.open(proc, "/proc/self/status");
 
-    // Read 2 bytes at a time
-    var buf: [2]u8 = undefined;
+    // Read 5 bytes at a time
+    var buf: [5]u8 = undefined;
     var n = try file.read(&buf);
-    try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("10", buf[0..n]);
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqualStrings("Name:", buf[0..n]);
 
     n = try file.read(&buf);
-    try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("0\n", buf[0..n]);
-
-    // EOF
-    n = try file.read(&buf);
-    try testing.expectEqual(@as(usize, 0), n);
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqualStrings("\tbvis", buf[0..n]);
 }

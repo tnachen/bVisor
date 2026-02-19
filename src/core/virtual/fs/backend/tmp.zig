@@ -1,7 +1,10 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
+const Tombstones = @import("../../Tombstones.zig");
+const dirent = @import("../dirent.zig");
 
 const builtin = @import("builtin");
 
@@ -89,6 +92,53 @@ pub const Tmp = struct {
         const rc = linux.lseek(self.fd, offset, @intCast(whence));
         try checkErr(rc, "tmp.lseek", .{});
         return @intCast(rc);
+    }
+
+    pub fn getdents64(
+        self: *Tmp,
+        allocator: Allocator,
+        buf: []u8,
+        dir_path: ?[]const u8,
+        dirents_offset: *usize,
+        tombstones: *const Tombstones,
+    ) !usize {
+        const path = dir_path orelse {
+            const rc = linux.getdents64(self.fd, buf.ptr, buf.len);
+            try checkErr(rc, "tmp.getdents64", .{});
+            return rc;
+        };
+
+        // Reset kernel FD's offset so we always read the full directory
+        _ = linux.lseek(self.fd, 0, linux.SEEK.SET);
+
+        var map = dirent.DirEntryMap{};
+        defer dirent.deinitMap(allocator, &map);
+
+        // Read all kernel directory entries
+        {
+            var kernel_buf: [4096]u8 = undefined;
+            while (true) {
+                const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
+                try checkErr(rc, "tmp.getdents64 kernel read", .{});
+                if (rc == 0) break;
+                const prev_count = map.count();
+                try dirent.collectDirents(
+                    allocator,
+                    kernel_buf[0..rc],
+                    &map,
+                    false,
+                );
+                if (map.count() == prev_count and rc > 0) break;
+            }
+        }
+
+        return dirent.serializeEntries(
+            &map,
+            buf,
+            path,
+            dirents_offset,
+            tombstones,
+        );
     }
 
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {

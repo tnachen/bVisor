@@ -108,7 +108,7 @@ test "connect on non-socket file returns ENOTSOCK" {
 
     // Insert a proc file (not a socket)
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     var addr = std.mem.zeroes(linux.sockaddr.un);

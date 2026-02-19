@@ -106,7 +106,7 @@ test "readv single iovec reads data correctly" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Set up a single iovec
@@ -124,7 +124,8 @@ test "readv single iovec reads data correctly" {
 
     const resp = try handle(notif, &supervisor);
     try testing.expect(resp.val > 0);
-    try testing.expectEqualStrings("100\n", result_buf[0..@intCast(resp.val)]);
+    const content = result_buf[0..@intCast(resp.val)];
+    try testing.expect(std.mem.startsWith(u8, content, "Name:\tbvisor-guest\n"));
 }
 
 test "readv multiple iovecs distributes data across buffers" {
@@ -138,15 +139,15 @@ test "readv multiple iovecs distributes data across buffers" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
-    // Content is "100\n" (4 bytes), distribute across 2-byte buffers
-    var buf1: [2]u8 = undefined;
-    var buf2: [2]u8 = undefined;
+    // Content starts with "Name:\tbvisor-guest\n..." — distribute across 5-byte buffers
+    var buf1: [5]u8 = undefined;
+    var buf2: [5]u8 = undefined;
     var iovecs = [_]iovec{
-        .{ .base = &buf1, .len = 2 },
-        .{ .base = &buf2, .len = 2 },
+        .{ .base = &buf1, .len = 5 },
+        .{ .base = &buf2, .len = 5 },
     };
 
     const notif = makeNotif(.readv, .{
@@ -157,9 +158,9 @@ test "readv multiple iovecs distributes data across buffers" {
     });
 
     const resp = try handle(notif, &supervisor);
-    try testing.expectEqual(@as(i64, 4), resp.val);
-    try testing.expectEqualStrings("10", &buf1);
-    try testing.expectEqualStrings("0\n", &buf2);
+    try testing.expectEqual(@as(i64, 10), resp.val);
+    try testing.expectEqualStrings("Name:", &buf1);
+    try testing.expectEqualStrings("\tbvis", &buf2);
 }
 
 test "readv FD 0 returns replyContinue" {

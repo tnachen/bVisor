@@ -92,8 +92,22 @@ pub fn init(allocator: Allocator, tid: AbsTid, thread_group: ?*ThreadGroup, name
 }
 
 /// Return the AbsTgid of a Thread
-pub fn get_tgid(self: *Self) AbsTgid {
+pub fn getTgid(self: *Self) AbsTgid {
     return self.thread_group.tgid;
+}
+
+// Return the NsTgid of a Thread relative to a Namespace
+pub fn getNsTgid(self: *Self, namespace: *Namespace) !?NsTgid {
+    const leader = try self.thread_group.getLeader();
+    const nstgid = namespace.getNsTid(leader);
+    return nstgid;
+}
+
+// Return the NsTgid of a Thread's parent ThreadGroup relative to a Namespace
+pub fn getNsPTgid(self: *Self, namespace: *Namespace) !?NsTgid {
+    const parent_group = self.thread_group.parent orelse return null;
+    const parent_leader = try parent_group.getLeader();
+    return namespace.getNsTid(parent_leader);
 }
 
 /// Whether this Thread represents a root process of its Namespace

@@ -61,10 +61,8 @@ test "lseek SEEK_SET repositions to given offset" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    // Insert a proc file (content "100\n" = 4 bytes)
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    var proc_file = try ProcFile.open(caller, "/proc/self");
-    // Advance offset by reading
+    var proc_file = try ProcFile.open(caller, "/proc/self/status");
     var tmp: [2]u8 = undefined;
     _ = try proc_file.read(&tmp);
     // offset is now 2
@@ -93,9 +91,9 @@ test "lseek SEEK_END positions relative to content end" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    // Insert a proc file (content "100\n" = 4 bytes)
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
+    const content_len: i64 = @intCast(proc_file.content_len);
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // Seek to end (offset 0 from END = content_len)
@@ -107,7 +105,8 @@ test "lseek SEEK_END positions relative to content end" {
     });
 
     const resp = try handle(notif, &supervisor);
-    try testing.expectEqual(@as(i64, 4), resp.val); // 4 bytes
+    try testing.expect(content_len > 0);
+    try testing.expectEqual(content_len, resp.val);
 }
 
 test "lseek SEEK_CUR advances from current position" {
@@ -121,7 +120,7 @@ test "lseek SEEK_CUR advances from current position" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    var proc_file = try ProcFile.open(caller, "/proc/self");
+    var proc_file = try ProcFile.open(caller, "/proc/self/status");
     // Read 1 byte to advance offset to 1
     var tmp: [1]u8 = undefined;
     _ = try proc_file.read(&tmp);
@@ -151,7 +150,7 @@ test "lseek to negative offset returns EINVAL" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     // SEEK_SET with negative offset
@@ -236,7 +235,7 @@ test "lseek with invalid whence returns EINVAL" {
     defer supervisor.deinit();
 
     const caller = supervisor.guest_threads.lookup.get(init_tid).?;
-    const proc_file = try ProcFile.open(caller, "/proc/self");
+    const proc_file = try ProcFile.open(caller, "/proc/self/status");
     const vfd = try caller.fd_table.insert(try File.init(allocator, .{ .proc = proc_file }), .{});
 
     const notif = makeNotif(.lseek, .{

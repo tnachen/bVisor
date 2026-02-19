@@ -1,8 +1,10 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 const Thread = @import("../proc/Thread.zig");
 const OverlayRoot = @import("../OverlayRoot.zig");
+const Tombstones = @import("../Tombstones.zig");
 
 const Cow = @import("backend/cow.zig").Cow;
 const Tmp = @import("backend/tmp.zig").Tmp;
@@ -29,6 +31,7 @@ allocator: std.mem.Allocator,
 ref_count: AtomicUsize = undefined,
 opened_path: ?[]u8 = null,
 open_flags: linux.O = .{},
+dirents_offset: usize = 0,
 
 pub fn init(allocator: std.mem.Allocator, backend: Backend) !*Self {
     const self = try allocator.create(Self);
@@ -123,6 +126,15 @@ pub fn statxByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []con
     };
 }
 
+pub fn getdents64(self: *Self, allocator: Allocator, buf: []u8, caller: ?*Thread, overlay: *OverlayRoot, tombstones: *const Tombstones) !usize {
+    switch (self.backend) {
+        .passthrough => |*f| return f.getdents64(buf),
+        .tmp => |*f| return f.getdents64(allocator, buf, self.opened_path, &self.dirents_offset, tombstones),
+        .cow => |*f| return f.getdents64(allocator, buf, self.opened_path, &self.dirents_offset, overlay, tombstones),
+        .proc => |*f| return f.getdents64(allocator, buf, caller.?, self.opened_path orelse return error.BADF, &self.dirents_offset),
+    }
+}
+
 /// Encode major/minor into a dev_t using the full Linux makedev formula
 /// (linux/kdev_t.h new_encode_dev).
 fn makedev(major: u32, minor: u32) u64 {
@@ -175,12 +187,15 @@ pub fn statxToStat(sx: linux.Statx) Stat {
     return st;
 }
 pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
-    switch (self.backend) {
-        .passthrough => |*f| return f.lseek(offset, whence),
-        .cow => |*f| return f.lseek(offset, whence),
-        .tmp => |*f| return f.lseek(offset, whence),
-        .proc => |*f| return f.lseek(offset, whence),
-    }
+    const result = switch (self.backend) {
+        .passthrough => |*f| f.lseek(offset, whence),
+        .cow => |*f| f.lseek(offset, whence),
+        .tmp => |*f| f.lseek(offset, whence),
+        .proc => |*f| f.lseek(offset, whence),
+    };
+    const pos = try result;
+    if (pos == 0) self.dirents_offset = 0;
+    return pos;
 }
 
 pub fn ioctl(self: *Self, request: linux.IOCTL.Request, arg: usize) !usize {

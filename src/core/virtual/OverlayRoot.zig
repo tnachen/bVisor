@@ -9,7 +9,12 @@ fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
     if (path.len > 512) return error.NAMETOOLONG;
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
-    const rc = linux.openat(linux.AT.FDCWD, path_buf[0..path.len :0], flags, mode);
+    const rc = linux.openat(
+        linux.AT.FDCWD,
+        path_buf[0..path.len :0],
+        flags,
+        mode,
+    );
     try checkErr(rc, "OverlayRoot.sysOpenat", .{});
     return @intCast(rc);
 }

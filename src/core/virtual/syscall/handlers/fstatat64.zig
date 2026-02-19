@@ -112,6 +112,15 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             return LinuxErr.PERM;
         },
         .handle => |h| {
+            // Check tombstones for COW/tmp paths (lock protects concurrent access)
+            if (h.backend == .cow or h.backend == .tmp) {
+                supervisor.mutex.lockUncancelable(supervisor.io);
+                defer supervisor.mutex.unlock(supervisor.io);
+                if (supervisor.tombstones.isTombstoned(h.normalized)) {
+                    return LinuxErr.NOENT;
+                }
+            }
+
             // Note all are lock-free (independent of internal Supervisor state) except for proc
             // For proc, sync Threads and get caller
             var caller: ?*Thread = null;

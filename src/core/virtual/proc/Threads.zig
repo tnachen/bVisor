@@ -297,7 +297,7 @@ pub fn handleThreadExit(self: *Self, tid: AbsTid) !void {
 }
 
 pub inline fn get_leader(self: *Self, thread: *Thread) !*Thread {
-    const leader_tid = thread.get_tgid();
+    const leader_tid = thread.getTgid();
     return self.get(leader_tid);
 }
 

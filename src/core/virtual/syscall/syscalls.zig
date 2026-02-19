@@ -42,6 +42,7 @@ const recvfrom = @import("handlers/recvfrom.zig");
 const sendto = @import("handlers/sendto.zig");
 const sendmsg = @import("handlers/sendmsg.zig");
 const recvmsg = @import("handlers/recvmsg.zig");
+const getdents64 = @import("handlers/getdents64.zig");
 const execve_ = @import("handlers/execve.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
@@ -77,6 +78,7 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .sendto => sendto.handle(notif, supervisor),
         .sendmsg => sendmsg.handle(notif, supervisor),
         .recvmsg => recvmsg.handle(notif, supervisor),
+        .getdents64 => getdents64.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),
@@ -93,8 +95,6 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .wait4 => replyContinue(notif.id),
         .waitid => replyContinue(notif.id),
 
-        // To implement - files
-        .getdents64,
         // To implement - should virtualize (info leak in multitenant)
         .getrlimit, // leaks resource config
         .getrusage, // leaks resource usage
