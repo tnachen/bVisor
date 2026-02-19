@@ -116,7 +116,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             if (h.backend == .cow or h.backend == .tmp) {
                 supervisor.mutex.lockUncancelable(supervisor.io);
                 defer supervisor.mutex.unlock(supervisor.io);
-                if (supervisor.tombstones.isTombstoned(h.normalized)) {
+                if (supervisor.tombstones.isTombstoned(h.normalized) or supervisor.tombstones.isAncestorTombstoned(h.normalized)) {
                     return LinuxErr.NOENT;
                 }
             }

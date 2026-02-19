@@ -103,7 +103,7 @@ fn handleCowMkdir(normalized: []const u8, mode: linux.mode_t, supervisor: *Super
 
         // Check parent exists from guest perspective
         const parent = std.fs.path.dirname(normalized) orelse "/";
-        if (supervisor.tombstones.isTombstoned(parent)) {
+        if (supervisor.tombstones.isTombstoned(parent) or supervisor.tombstones.isAncestorTombstoned(normalized)) {
             return error.NOENT;
         }
         if (!supervisor.overlay.cowExists(parent) and !OverlayRoot.pathExistsOnRealFs(parent)) {
@@ -135,7 +135,7 @@ fn handleTmpMkdir(normalized: []const u8, mode: linux.mode_t, supervisor: *Super
         // /tmp itself always exists; other parents must exist in overlay
         const parent = std.fs.path.dirname(normalized) orelse "/tmp";
         if (!std.mem.eql(u8, parent, "/tmp")) {
-            if (supervisor.tombstones.isTombstoned(parent)) {
+            if (supervisor.tombstones.isTombstoned(parent) or supervisor.tombstones.isAncestorTombstoned(normalized)) {
                 return error.NOENT;
             }
             if (!supervisor.overlay.tmpExists(parent)) {

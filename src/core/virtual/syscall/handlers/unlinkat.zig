@@ -109,6 +109,10 @@ fn handleCowUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
 
+        if (supervisor.tombstones.isAncestorTombstoned(normalized)) {
+            return error.NOENT;
+        }
+
         const parent = std.fs.path.dirname(normalized) orelse "/";
         if (supervisor.overlay.guestPathExists(parent) and !supervisor.overlay.isGuestDir(parent)) {
             return error.NOTDIR;
@@ -135,6 +139,10 @@ fn handleCowRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
 
+    if (supervisor.tombstones.isAncestorTombstoned(normalized)) {
+        return error.NOENT;
+    }
+
     const parent = std.fs.path.dirname(normalized) orelse "/";
     if (supervisor.overlay.guestPathExists(parent) and !supervisor.overlay.isGuestDir(parent)) {
         return error.NOTDIR;
@@ -156,13 +164,21 @@ fn handleCowRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
         return error.NOTEMPTY;
     }
 
+    supervisor.tombstones.removeChildren(normalized);
     try supervisor.tombstones.add(normalized);
+
+    // Physical cleanup (ignore errors — tombstone is the source of truth)
+    Cow.rmdir(&supervisor.overlay, normalized);
 }
 
 fn handleTmpUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
+
+        if (supervisor.tombstones.isAncestorTombstoned(normalized)) {
+            return error.NOENT;
+        }
 
         const parent = std.fs.path.dirname(normalized) orelse "/tmp";
         if (!std.mem.eql(u8, parent, "/tmp")) {
@@ -191,6 +207,10 @@ fn handleTmpRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
 
+    if (supervisor.tombstones.isAncestorTombstoned(normalized)) {
+        return error.NOENT;
+    }
+
     const parent = std.fs.path.dirname(normalized) orelse "/tmp";
     if (!std.mem.eql(u8, parent, "/tmp")) {
         if (supervisor.overlay.tmpExists(parent) and !supervisor.overlay.isTmpDir(parent)) {
@@ -214,6 +234,7 @@ fn handleTmpRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
         return error.NOTEMPTY;
     }
 
+    supervisor.tombstones.removeChildren(normalized);
     try supervisor.tombstones.add(normalized);
 
     // Physical cleanup (ignore errors — tombstone is the source of truth)

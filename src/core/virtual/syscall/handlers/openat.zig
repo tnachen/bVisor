@@ -89,6 +89,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             if (h.backend == .cow or h.backend == .tmp) {
                 supervisor.mutex.lockUncancelable(supervisor.io);
                 defer supervisor.mutex.unlock(supervisor.io);
+                if (supervisor.tombstones.isAncestorTombstoned(h.normalized)) {
+                    return LinuxErr.NOENT;
+                }
                 if (supervisor.tombstones.isTombstoned(h.normalized)) {
                     if (flags.CREAT) {
                         supervisor.tombstones.remove(h.normalized);

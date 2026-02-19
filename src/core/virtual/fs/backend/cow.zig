@@ -181,6 +181,13 @@ pub const Cow = union(enum) {
         _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], 0);
     }
 
+    pub fn rmdir(overlay: *OverlayRoot, path: []const u8) void {
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = overlay.resolveCow(path, &cow_path_buf) catch return;
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], linux.AT.REMOVEDIR);
+    }
+
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
         const fd = switch (self.*) {
             inline else => |fd| fd,
