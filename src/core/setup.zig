@@ -11,22 +11,18 @@ const Io = std.Io;
 const pidfd = @import("utils/pidfd.zig");
 const lookupGuestFd = pidfd.lookupGuestFdWithRetry;
 
+/// The guest calls close_range(3, MAX) then seccomp.install(), so the
+/// notify FD is always 3 (the first slot after stdio)
+const expected_notify_fd: linux.fd_t = 3;
+
 pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, stdout: *LogBuffer, stderr: *LogBuffer) !void {
     const start_time = Io.Clock.awake.now(io);
-
-    // Probe the next available FD: dup gives the lowest free FD, then close it.
-    // After fork, seccomp.install() in the child will allocate the same FD number.
-    // This will race with other noise in the env, and is a temp solution
-    const dup_rc = linux.dup(0);
-    if (linux.errno(dup_rc) != .SUCCESS) return error.SyscallFailed;
-    const expected_notify_fd: linux.fd_t = @intCast(dup_rc);
-    _ = linux.close(expected_notify_fd);
 
     const fork_rc = linux.fork();
     if (linux.errno(fork_rc) != .SUCCESS) return error.SyscallFailed;
     const fork_result: linux.pid_t = @intCast(fork_rc);
     if (fork_result == 0) {
-        try guestProcess(cmd, expected_notify_fd);
+        guestProcess(cmd);
     } else {
         const init_guest_tid: linux.pid_t = fork_result;
         try supervisorProcess(
@@ -35,25 +31,34 @@ pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, std
             uid,
             start_time,
             init_guest_tid,
-            expected_notify_fd,
             stdout,
             stderr,
         );
     }
 }
 
-fn guestProcess(cmd: [:0]const u8, expected_notify_fd: linux.fd_t) !void {
-    // Install seccomp filter
-    const notify_fd = try seccomp.install();
+fn guestProcess(cmd: [:0]const u8) noreturn {
+    // Close all inherited FDs except stdio (0/1/2) so the guest starts
+    // with a clean kernel FD table. seccomp.install() will then allocate
+    // the notify FD at slot 3 (the first available)
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
+
+    // Install seccomp filter — notify FD lands at slot 3
+    const notify_fd = seccomp.install() catch {
+        linux.exit_group(1);
+    };
     if (notify_fd != expected_notify_fd) {
-        return error.NotifyFdMismatch;
+        linux.exit_group(1);
     }
     // Note all syscalls after this point will be handled by supervisor
 
     // Execve into a bash command
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd.ptr };
     // TODO: expose environment variables
-    const envp = [_:null]?[*:0]const u8{};
+    const envp = [_:null]?[*:0]const u8{
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME=/",
+    };
 
     _ = linux.execve("/bin/sh", &argv, &envp);
     linux.exit_group(1); // only reached if execve fails
@@ -65,7 +70,6 @@ fn supervisorProcess(
     uid: [16]u8,
     start_time: Io.Timestamp,
     init_guest_tid: linux.pid_t,
-    expected_notify_fd: linux.fd_t,
     stdout: *LogBuffer,
     stderr: *LogBuffer,
 ) !void {

@@ -6,7 +6,9 @@ const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Passthrough = @import("../../fs/backend/passthrough.zig").Passthrough;
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
@@ -43,6 +45,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
     const write_vfd = try caller.fd_table.insert(write_file, .{ .cloexec = cloexec });
     errdefer _ = caller.fd_table.remove(write_vfd);
+
+    try addfd(supervisor.notify_fd, notif.id, kernel_fds[0], read_vfd, cloexec);
+    try addfd(supervisor.notify_fd, notif.id, kernel_fds[1], write_vfd, cloexec);
 
     // Write the virtual fds back to the caller's pipefd[2] array
     const vfds = [2]i32{ read_vfd, write_vfd };

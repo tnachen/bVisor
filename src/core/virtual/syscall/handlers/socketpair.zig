@@ -5,7 +5,9 @@ const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
@@ -43,6 +45,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
     const vfd1 = try caller.fd_table.insert(file1, .{ .cloexec = cloexec });
     errdefer _ = caller.fd_table.remove(vfd1);
+
+    try addfd(supervisor.notify_fd, notif.id, kernel_fds[0], vfd0, cloexec);
+    try addfd(supervisor.notify_fd, notif.id, kernel_fds[1], vfd1, cloexec);
 
     // Write the virtual fds back to the caller's sv[2] array
     const vfds = [2]i32{ vfd0, vfd1 };

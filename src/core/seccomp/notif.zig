@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const Logger = @import("../types.zig").Logger;
+const checkErr = @import("../linux_error.zig").checkErr;
 
 const supervisor_logger = Logger.init(.supervisor);
 
@@ -55,6 +57,20 @@ pub fn replyErr(id: u64, err: linux.E) linux.SECCOMP.notif_resp {
         .val = -1,
         .@"error" = -@as(i32, @intCast(@intFromEnum(err))),
     };
+}
+
+/// Inject a supervisor FD into the guest's kernel FD table at a specific slot
+pub fn addfd(notify_fd: linux.fd_t, id: u64, srcfd: linux.fd_t, newfd: i32, cloexec: bool) !void {
+    if (comptime builtin.is_test) return;
+    var req = linux.SECCOMP.notif_addfd{
+        .id = id,
+        .flags = linux.SECCOMP.ADDFD_FLAG.SETFD,
+        .srcfd = @intCast(srcfd),
+        .newfd = @intCast(newfd),
+        .newfd_flags = if (cloexec) @as(u32, @bitCast(linux.O{ .CLOEXEC = true })) else 0,
+    };
+    const rc = linux.ioctl(notify_fd, linux.SECCOMP.IOCTL_NOTIF.ADDFD, @intFromPtr(&req));
+    try checkErr(rc, "addfd: failed to inject fd", .{});
 }
 
 pub fn isContinue(resp: linux.SECCOMP.notif_resp) bool {

@@ -6,7 +6,9 @@ const checkErr = @import("../../../linux_error.zig").checkErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 const Logger = @import("../../../types.zig").Logger;
 const F = linux.F;
 
@@ -28,8 +30,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const caller = try supervisor.guest_threads.get(caller_tid);
 
     return switch (cmd) {
-        F.DUPFD => handleDupFd(notif.id, fd, arg, caller, logger, false),
-        F_DUPFD_CLOEXEC => handleDupFd(notif.id, fd, arg, caller, logger, true),
+        F.DUPFD => handleDupFd(supervisor.notify_fd, notif.id, fd, arg, caller, logger, false),
+        F_DUPFD_CLOEXEC => handleDupFd(supervisor.notify_fd, notif.id, fd, arg, caller, logger, true),
         F.GETFD => handleGetFd(notif.id, fd, caller, logger),
         F.SETFD => handleSetFd(notif.id, fd, arg, caller, logger),
         F.GETFL => handleGetFl(notif.id, fd, caller, logger),
@@ -63,6 +65,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 // TODO: respect "lowest fd >= arg" constraint even for VirtualFD's
 /// Duplicate fd
 fn handleDupFd(
+    notify_fd: linux.fd_t,
     id: u64,
     fd: i32,
     arg: u64,
@@ -79,6 +82,11 @@ fn handleDupFd(
     defer file.unref();
 
     const newfd = try caller.fd_table.dup(file);
+    errdefer _ = caller.fd_table.remove(newfd);
+
+    if (file.backingFd()) |backing_fd| {
+        try addfd(notify_fd, id, backing_fd, newfd, cloexec);
+    }
 
     // CLOEXEC defaults to false
     if (cloexec) {
