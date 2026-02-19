@@ -15,6 +15,8 @@ const F = linux.F;
 /// F_DUPFD_CLOEXEC is not in Zig's linux.F struct
 const F_DUPFD_CLOEXEC = 1030;
 
+const replyContinue = notif_helpers.replyContinue;
+
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
@@ -22,6 +24,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
     const cmd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg1)));
     const arg: u64 = notif.data.arg2; // versatile role depending on cmd
+
+    // Passthrough stdin/stdout/stderr to the kernel
+    if (fd == linux.STDIN_FILENO or fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
+        logger.log("fcntl: passthrough for fd={d} cmd={d}", .{ fd, cmd });
+        return replyContinue(notif.id);
+    }
 
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
