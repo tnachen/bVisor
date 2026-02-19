@@ -90,8 +90,8 @@ test "getdents64 on directory returns entries" {
     defer supervisor.deinit();
 
     // Create a test directory with a known file
-    const dir_path = "/tmp/bvisor_test_getdents_pt";
-    const file_path = "/tmp/bvisor_test_getdents_pt/hello.txt";
+    const dir_path: [:0]const u8 = "/tmp/bvisor_test_getdents_pt";
+    const file_path: [:0]const u8 = "/tmp/bvisor_test_getdents_pt/hello.txt";
     var dir_path_z: [dir_path.len + 1]u8 = undefined;
     @memcpy(dir_path_z[0..dir_path.len], dir_path);
     dir_path_z[dir_path.len] = 0;
@@ -237,8 +237,8 @@ test "COW getdents64 lists real directory contents" {
     defer supervisor.deinit();
 
     // Create a test directory with a known file
-    const dir_path = "/tmp/bvisor_test_getdents_cow";
-    const known_file = "/tmp/bvisor_test_getdents_cow/known.txt";
+    const dir_path: [:0]const u8 = "/tmp/bvisor_test_getdents_cow";
+    const known_file: [:0]const u8 = "/tmp/bvisor_test_getdents_cow/known.txt";
     var dir_path_z: [dir_path.len + 1]u8 = undefined;
     @memcpy(dir_path_z[0..dir_path.len], dir_path);
     dir_path_z[dir_path.len] = 0;
@@ -301,8 +301,8 @@ test "COW getdents64 filters tombstoned entries" {
     defer supervisor.deinit();
 
     // Create a test directory with a known file
-    const dir_path = "/tmp/bvisor_test_getdents_ts";
-    const file_path = "/tmp/bvisor_test_getdents_ts/target.txt";
+    const dir_path: [:0]const u8 = "/tmp/bvisor_test_getdents_ts";
+    const file_path: [:0]const u8 = "/tmp/bvisor_test_getdents_ts/target.txt";
 
     // Create directory and file
     var dir_path_z: [dir_path.len + 1]u8 = undefined;
@@ -382,8 +382,8 @@ test "COW getdents64 second call returns EOF" {
     defer supervisor.deinit();
 
     // Create a test directory with a known file
-    const dir_path = "/tmp/bvisor_test_getdents_eof";
-    const known_file = "/tmp/bvisor_test_getdents_eof/entry.txt";
+    const dir_path: [:0]const u8 = "/tmp/bvisor_test_getdents_eof";
+    const known_file: [:0]const u8 = "/tmp/bvisor_test_getdents_eof/entry.txt";
     var dir_path_z: [dir_path.len + 1]u8 = undefined;
     @memcpy(dir_path_z[0..dir_path.len], dir_path);
     dir_path_z[dir_path.len] = 0;
