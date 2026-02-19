@@ -50,11 +50,19 @@ pub fn removeChildren(self: *Self, dir_path: []const u8) void {
         break :blk buf[0 .. dir_path.len + 1];
     };
 
+    var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_remove.deinit(self.allocator);
+
     var iter = self.map.iterator();
     while (iter.next()) |entry| {
         if (std.mem.startsWith(u8, entry.key_ptr.*, prefix) and entry.key_ptr.*.len > prefix.len) {
-            self.allocator.free(entry.key_ptr.*);
-            self.map.removeByPtr(entry.key_ptr);
+            to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+        }
+    }
+
+    for (to_remove.items) |key| {
+        if (self.map.fetchRemove(key)) |entry| {
+            self.allocator.free(entry.key);
         }
     }
 }
