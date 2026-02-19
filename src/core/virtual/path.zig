@@ -52,6 +52,7 @@ const router_rules: []const Rule = &.{
     // Hard blocks
     .{ .prefix = "/sys", .node = .{ .terminal = .block } },
     .{ .prefix = "/run", .node = .{ .terminal = .block } },
+    .{ .prefix = "/.b", .node = .{ .terminal = .block } },
 
     // Block /dev by default
     // Except safe devs
@@ -272,6 +273,16 @@ test "/system/file does not match /sys prefix" {
 test "/devnull does not match /dev prefix" {
     const result = try route("/devnull");
     try testing.expectEqual(RouteResult{ .handle = .cow }, result);
+}
+
+test "/.b/000 is blocked (internal symlink directory)" {
+    const result = try route("/.b/000");
+    try testing.expectEqual(RouteResult.block, result);
+}
+
+test "/.b alone is blocked" {
+    const result = try route("/.b");
+    try testing.expectEqual(RouteResult.block, result);
 }
 
 test "/running/file does not match /run prefix" {

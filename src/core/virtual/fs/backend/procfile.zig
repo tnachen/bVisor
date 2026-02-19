@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const Thread = @import("../../proc/Thread.zig");
 const NsTgid = Thread.NsTgid;
@@ -84,13 +85,8 @@ pub const ProcFile = struct {
     }
 
     fn formatStatus(buf: *[256]u8, target: *Thread) !usize {
-        const leader = try target.thread_group.getLeader();
-        const nstgid = target.namespace.getNsTid(leader) orelse 0;
-
-        const nsptgid: NsTgid = if (target.thread_group.parent) |parent_process| blk: {
-            const parent = try parent_process.getLeader();
-            break :blk target.namespace.getNsTid(parent) orelse 0;
-        } else 0;
+        const nstgid = try target.getNsTgid(target.namespace) orelse 0;
+        const nsptgid = try target.getNsPTgid(target.namespace) orelse 0;
 
         // TODO: support more status content lookup, this isn't 100% compatible
         // We also use the same name for everything
@@ -102,7 +98,14 @@ pub const ProcFile = struct {
     /// Synthesize linux_dirent64 entries for a /proc directory listing.
     /// `caller` is needed to enumerate visible PIDs from the caller's namespace.
     /// `opened_path` distinguishes /proc (list PIDs) from /proc/<pid> (list subfiles).
-    pub fn getdents64(_: *ProcFile, buf: []u8, caller: *Thread, opened_path: []const u8, dirents_offset: *usize) !usize {
+    pub fn getdents64(
+        _: *ProcFile,
+        allocator: Allocator,
+        buf: []u8,
+        caller: *Thread,
+        opened_path: []const u8,
+        dirents_offset: *usize,
+    ) !usize {
         var names_buf: [64][]const u8 = undefined;
         var num_fmt_buf: [64][16]u8 = undefined;
         var name_count: usize = 0;
@@ -116,12 +119,12 @@ pub const ProcFile = struct {
             names_buf[name_count] = "self";
             name_count += 1;
 
-            var iter = caller.namespace.threads.iterator();
+            var tgid_set = try caller.namespace.getNamespacedThreadGroupIds(allocator);
+            defer tgid_set.deinit(allocator);
+
             var pid_idx: usize = 0;
-            while (iter.next()) |entry| {
+            for (tgid_set.keys()) |nstgid| {
                 if (name_count >= names_buf.len or pid_idx >= num_fmt_buf.len) break;
-                const nstgid = entry.key_ptr.*;
-                if (nstgid <= 0) continue;
                 const slice = std.fmt.bufPrint(&num_fmt_buf[pid_idx], "{d}", .{nstgid}) catch continue;
                 names_buf[name_count] = slice;
                 name_count += 1;
