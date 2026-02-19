@@ -188,6 +188,16 @@ pub const Cow = union(enum) {
         _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], linux.AT.REMOVEDIR);
     }
 
+    pub fn symlink(overlay: *OverlayRoot, target: []const u8, linkpath: []const u8) !void {
+        try overlay.createCowParentDirs(linkpath);
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = try overlay.resolveCow(linkpath, &cow_path_buf);
+        const target_nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const link_nt = OverlayRoot.nullTerminate(cow_path) catch return error.NAMETOOLONG;
+        const rc = linux.symlinkat(target_nt[0..target.len :0], linux.AT.FDCWD, link_nt[0..cow_path.len :0]);
+        try checkErr(rc, "cow.symlink", .{});
+    }
+
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
         const fd = switch (self.*) {
             inline else => |fd| fd,
