@@ -12,10 +12,10 @@ const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-// mkdirat(dirfd, pathname, mode)
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
+    // Parse args: mkdirat(dirfd, pathname, mode)
     const caller_tid: AbsTid = @intCast(notif.pid);
     const dirfd: i32 = @truncate(@as(i64, @bitCast(notif.data.arg0)));
     const path_ptr: u64 = notif.data.arg1;
@@ -109,6 +109,9 @@ fn handleCowMkdir(normalized: []const u8, mode: linux.mode_t, supervisor: *Super
         if (!supervisor.overlay.cowExists(parent) and !OverlayRoot.pathExistsOnRealFs(parent)) {
             return error.NOENT;
         }
+        if (!supervisor.overlay.isGuestDir(parent)) {
+            return error.NOTDIR;
+        }
     }
 
     try Cow.mkdir(&supervisor.overlay, normalized, mode);
@@ -137,6 +140,9 @@ fn handleTmpMkdir(normalized: []const u8, mode: linux.mode_t, supervisor: *Super
             }
             if (!supervisor.overlay.tmpExists(parent)) {
                 return error.NOENT;
+            }
+            if (!supervisor.overlay.isTmpDir(parent)) {
+                return error.NOTDIR;
             }
         }
     }
@@ -216,7 +222,7 @@ test "mkdirat on tombstoned path succeeds" {
     const resp1 = try handle(makeMkdiratNotif(init_tid, "/tmp/test_mkdir_tomb", 0o755), &supervisor);
     try testing.expectEqual(@as(i64, 0), resp1.val);
 
-    try supervisor.tombstones.add("/tmp/test_mkdir_tomb", .dir);
+    try supervisor.tombstones.add("/tmp/test_mkdir_tomb");
 
     const resp2 = try handle(makeMkdiratNotif(init_tid, "/tmp/test_mkdir_tomb", 0o755), &supervisor);
     try testing.expectEqual(@as(i64, 0), resp2.val);
@@ -269,4 +275,57 @@ test "mkdirat on COW path creates in overlay" {
 
     // Verify it exists in COW overlay
     try testing.expect(supervisor.overlay.cowExists("/home/bvisor_test_mkdir"));
+}
+
+test "mkdirat empty path returns EINVAL" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    try testing.expectError(error.INVAL, handle(makeMkdiratNotif(init_tid, "", 0o755), &supervisor));
+}
+
+test "mkdirat with file as parent on COW path returns ENOTDIR" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // /etc/hostname is a file, not a directory
+    try testing.expectError(error.NOTDIR, handle(makeMkdiratNotif(init_tid, "/etc/hostname/newdir", 0o755), &supervisor));
+}
+
+test "mkdirat with file as parent on tmp path returns ENOTDIR" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // Create a file in /tmp
+    const openat = @import("openat.zig");
+    const openat_notif = makeNotif(.openat, .{
+        .pid = init_tid,
+        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
+        .arg1 = @intFromPtr(@as([*:0]const u8, "/tmp/test_notdir_file")),
+        .arg2 = @as(u32, @bitCast(linux.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true })),
+        .arg3 = @as(u64, 0o644),
+    });
+    const open_resp = try openat.handle(openat_notif, &supervisor);
+    try testing.expect(open_resp.val >= 3);
+
+    // Try to mkdir under a file
+    try testing.expectError(error.NOTDIR, handle(makeMkdiratNotif(init_tid, "/tmp/test_notdir_file/subdir", 0o755), &supervisor));
 }

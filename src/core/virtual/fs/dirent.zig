@@ -80,6 +80,16 @@ pub fn parseDirentNames(buf: []const u8, out: [][]const u8) usize {
     return count_;
 }
 
+/// Check if a merged directory map is empty from the guest perspective.
+/// A directory is "empty" if it contains only "." and ".." after filtering tombstones.
+pub fn isMapEmpty(map: *const DirEntryMap, dir_path: []const u8, tombstones: *const Tombstones) bool {
+    for (map.keys()) |name| {
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        if (!tombstones.isChildTombstoned(dir_path, name)) return false;
+    }
+    return true;
+}
+
 /// Serialize directory entries into a buffer, filtering tombstoned and already-returned entries.
 pub fn serializeEntries(
     map: *const DirEntryMap,

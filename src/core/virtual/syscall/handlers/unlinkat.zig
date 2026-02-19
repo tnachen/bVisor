@@ -6,6 +6,7 @@ const AbsTid = Thread.AbsTid;
 const Cow = @import("../../fs/backend/cow.zig").Cow;
 const Tmp = @import("../../fs/backend/tmp.zig").Tmp;
 const cow_mod = @import("../../fs/backend/cow.zig");
+const tmp_mod = @import("../../fs/backend/tmp.zig");
 const path_router = @import("../../path.zig");
 const resolveAndRoute = path_router.resolveAndRoute;
 const OverlayRoot = @import("../../OverlayRoot.zig");
@@ -14,12 +15,12 @@ const Supervisor = @import("../../../Supervisor.zig");
 const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
-// unlinkat(dirfd, pathname, flags)
-//   flags == 0: unlink file
-//   flags & AT_REMOVEDIR: rmdir
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
 
+    // Parse args: unlinkat(dirfd, pathname, flags)
+    //  flags == 0: unlink file
+    //  flags & AT_REMOVEDIR: rmdir
     const caller_tid: AbsTid = @intCast(notif.pid);
     const dirfd: i32 = @truncate(@as(i64, @bitCast(notif.data.arg0)));
     const path_ptr: u64 = notif.data.arg1;
@@ -29,9 +30,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     var path_buf: [256]u8 = undefined;
     const path = try memory_bridge.readString(&path_buf, caller_tid, path_ptr);
 
-    if (path.len == 0) {
-        return LinuxErr.INVAL;
-    }
+    // Invalid flags return EINVAL
+    if ((flags & ~@as(u32, linux.AT.REMOVEDIR)) != 0) return LinuxErr.INVAL;
+
+    if (path.len == 0) return LinuxErr.INVAL;
+
+    // rmdir(".") gives EINVAL
+    if (is_rmdir and std.mem.eql(u8, path, ".")) return LinuxErr.INVAL;
 
     // Resolve base directory
     var base_buf: [512]u8 = undefined;
@@ -104,6 +109,11 @@ fn handleCowUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
 
+        const parent = std.fs.path.dirname(normalized) orelse "/";
+        if (supervisor.overlay.guestPathExists(parent) and !supervisor.overlay.isGuestDir(parent)) {
+            return error.NOTDIR;
+        }
+
         if (supervisor.tombstones.isTombstoned(normalized)) {
             return error.NOENT;
         }
@@ -114,7 +124,7 @@ fn handleCowUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
             return error.ISDIR;
         }
 
-        try supervisor.tombstones.add(normalized, .file);
+        try supervisor.tombstones.add(normalized);
     }
 
     // Physical cleanup: remove overlay copy if it exists
@@ -124,6 +134,11 @@ fn handleCowUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
 fn handleCowRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
+
+    const parent = std.fs.path.dirname(normalized) orelse "/";
+    if (supervisor.overlay.guestPathExists(parent) and !supervisor.overlay.isGuestDir(parent)) {
+        return error.NOTDIR;
+    }
 
     if (supervisor.tombstones.isTombstoned(normalized)) {
         return error.NOENT;
@@ -136,18 +151,25 @@ fn handleCowRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     }
 
     // Check directory is empty from guest perspective (merged view)
-    const empty = try cow_mod.isDirEmpty(normalized, &supervisor.overlay, &supervisor.tombstones);
+    const empty = try cow_mod.isDirEmpty(supervisor.allocator, normalized, &supervisor.overlay, &supervisor.tombstones);
     if (!empty) {
         return error.NOTEMPTY;
     }
 
-    try supervisor.tombstones.add(normalized, .dir);
+    try supervisor.tombstones.add(normalized);
 }
 
 fn handleTmpUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
+
+        const parent = std.fs.path.dirname(normalized) orelse "/tmp";
+        if (!std.mem.eql(u8, parent, "/tmp")) {
+            if (supervisor.overlay.tmpExists(parent) and !supervisor.overlay.isTmpDir(parent)) {
+                return error.NOTDIR;
+            }
+        }
 
         if (supervisor.tombstones.isTombstoned(normalized)) {
             return error.NOENT;
@@ -159,7 +181,7 @@ fn handleTmpUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
             return error.ISDIR;
         }
 
-        try supervisor.tombstones.add(normalized, .file);
+        try supervisor.tombstones.add(normalized);
     }
 
     Tmp.unlink(&supervisor.overlay, normalized);
@@ -168,6 +190,13 @@ fn handleTmpUnlink(normalized: []const u8, supervisor: *Supervisor) !void {
 fn handleTmpRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
+
+    const parent = std.fs.path.dirname(normalized) orelse "/tmp";
+    if (!std.mem.eql(u8, parent, "/tmp")) {
+        if (supervisor.overlay.tmpExists(parent) and !supervisor.overlay.isTmpDir(parent)) {
+            return error.NOTDIR;
+        }
+    }
 
     if (supervisor.tombstones.isTombstoned(normalized)) {
         return error.NOENT;
@@ -180,12 +209,12 @@ fn handleTmpRmdir(normalized: []const u8, supervisor: *Supervisor) !void {
     }
 
     // Check emptiness: read overlay entries, filter tombstoned children
-    const empty = try Tmp.isDirEmpty(&supervisor.overlay, normalized, &supervisor.tombstones);
+    const empty = try tmp_mod.isDirEmpty(supervisor.allocator, &supervisor.overlay, normalized, &supervisor.tombstones);
     if (!empty) {
         return error.NOTEMPTY;
     }
 
-    try supervisor.tombstones.add(normalized, .dir);
+    try supervisor.tombstones.add(normalized);
 
     // Physical cleanup (ignore errors — tombstone is the source of truth)
     Tmp.rmdir(&supervisor.overlay, normalized);
@@ -251,7 +280,7 @@ test "unlinkat on tombstoned path returns ENOENT" {
     var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
     defer supervisor.deinit();
 
-    try supervisor.tombstones.add("/etc/passwd", .file);
+    try supervisor.tombstones.add("/etc/passwd");
     try testing.expectError(error.NOENT, handle(makeUnlinkatNotif(init_tid, "/etc/passwd", 0), &supervisor));
 }
 
@@ -334,6 +363,45 @@ test "unlinkat REMOVEDIR on non-empty COW dir returns ENOTEMPTY" {
     try testing.expectError(error.NOTEMPTY, handle(makeUnlinkatNotif(init_tid, "/etc", linux.AT.REMOVEDIR), &supervisor));
 }
 
+test "unlinkat empty path returns EINVAL" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    try testing.expectError(error.INVAL, handle(makeUnlinkatNotif(init_tid, "", 0), &supervisor));
+}
+
+test "unlinkat with invalid flags returns EINVAL" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    try testing.expectError(error.INVAL, handle(makeUnlinkatNotif(init_tid, "/tmp/foo", 0x300), &supervisor));
+}
+
+test "unlinkat REMOVEDIR on '.' returns EINVAL" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    try testing.expectError(error.INVAL, handle(makeUnlinkatNotif(init_tid, ".", linux.AT.REMOVEDIR), &supervisor));
+}
+
 test "unlinkat unknown caller returns ESRCH" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
@@ -348,7 +416,21 @@ test "unlinkat unknown caller returns ESRCH" {
     try testing.expectError(error.SRCH, handle(makeUnlinkatNotif(999, "foo", 0), &supervisor));
 }
 
-test "after unlinkat, path is tombstoned and openat returns ENOENT" {
+test "unlinkat with file as parent on COW path returns ENOTDIR" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // /etc/hostname is a file, not a directory
+    try testing.expectError(error.NOTDIR, handle(makeUnlinkatNotif(init_tid, "/etc/hostname/foo", 0), &supervisor));
+}
+
+test "after unlinkat, path is tombstoned and fstatat64 returns ENOENT" {
     const allocator = testing.allocator;
     const init_tid: AbsTid = 100;
     var stdout_buf = LogBuffer.init(allocator);

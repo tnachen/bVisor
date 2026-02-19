@@ -9,8 +9,11 @@ const dirent = @import("../dirent.zig");
 const builtin = @import("builtin");
 
 fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
-    const buf = OverlayRoot.nullTerminate(path) catch return error.NAMETOOLONG;
-    const rc = linux.openat(linux.AT.FDCWD, buf[0..path.len :0], flags, mode);
+    var path_buf: [513]u8 = undefined;
+    if (path.len > 512) return error.NAMETOOLONG;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const rc = linux.openat(linux.AT.FDCWD, path_buf[0..path.len :0], flags, mode);
     try checkErr(rc, "tmp.sysOpenat", .{});
     return @intCast(rc);
 }
@@ -25,24 +28,6 @@ fn sysWrite(fd: linux.fd_t, data: []const u8) !usize {
     const rc = linux.write(fd, data.ptr, data.len);
     try checkErr(rc, "tmp.sysWrite", .{});
     return rc;
-}
-
-/// Collect directory entries from a single open fd into the provided buffers.
-fn collectFromFd(
-    fd: linux.fd_t,
-    entries: *[dirent.MAX_DIR_ENTRIES]dirent.DirEntry,
-    entry_count: *usize,
-    name_storage: *[dirent.MAX_NAME_STORAGE]u8,
-    name_pos: *usize,
-) void {
-    var kernel_buf: [4096]u8 = undefined;
-    while (entry_count.* < dirent.MAX_DIR_ENTRIES and name_pos.* < dirent.MAX_NAME_STORAGE) {
-        const rc = linux.getdents64(fd, &kernel_buf, kernel_buf.len);
-        if (linux.errno(rc) != .SUCCESS or rc == 0) break;
-        const prev_count = entry_count.*;
-        dirent.collectDirents(kernel_buf[0..rc], entries, entry_count, name_storage, name_pos);
-        if (entry_count.* == prev_count and rc > 0) break;
-    }
 }
 
 pub const Tmp = struct {
@@ -115,6 +100,7 @@ pub const Tmp = struct {
         buf: []u8,
         dir_path: ?[]const u8,
         dirents_offset: *usize,
+        overlay: *OverlayRoot,
         tombstones: *const Tombstones,
     ) !usize {
         const path = dir_path orelse {
@@ -123,29 +109,8 @@ pub const Tmp = struct {
             return rc;
         };
 
-        // Reset kernel FD's offset so we always read the full directory
-        _ = linux.lseek(self.fd, 0, linux.SEEK.SET);
-
-        var map = dirent.DirEntryMap{};
+        var map = try mergeDirEntries(allocator, overlay, path, self.fd);
         defer dirent.deinitMap(allocator, &map);
-
-        // Read all kernel directory entries
-        {
-            var kernel_buf: [4096]u8 = undefined;
-            while (true) {
-                const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
-                try checkErr(rc, "tmp.getdents64 kernel read", .{});
-                if (rc == 0) break;
-                const prev_count = map.count();
-                try dirent.collectDirents(
-                    allocator,
-                    kernel_buf[0..rc],
-                    &map,
-                    false,
-                );
-                if (map.count() == prev_count and rc > 0) break;
-            }
-        }
 
         return dirent.serializeEntries(
             &map,
@@ -188,28 +153,6 @@ pub const Tmp = struct {
         _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], linux.AT.REMOVEDIR);
     }
 
-    /// Check if a tmp directory is empty from the guest's perspective.
-    /// Reads overlay entries and filters tombstoned children.
-    pub fn isDirEmpty(overlay: *OverlayRoot, path: []const u8, tombstones: *const Tombstones) !bool {
-        var buf: [512]u8 = undefined;
-        const resolved = try overlay.resolveTmp(path, &buf);
-        const fd = try sysOpenat(resolved, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0);
-        defer _ = linux.close(fd);
-
-        var name_storage: [dirent.MAX_NAME_STORAGE]u8 = undefined;
-        var name_pos: usize = 0;
-        var entries: [dirent.MAX_DIR_ENTRIES]dirent.DirEntry = undefined;
-        var entry_count: usize = 0;
-
-        collectFromFd(fd, &entries, &entry_count, &name_storage, &name_pos);
-
-        for (entries[0..entry_count]) |entry| {
-            if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
-            if (!tombstones.isChildTombstoned(path, entry.name)) return false;
-        }
-        return true;
-    }
-
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {
         const rc = linux.ioctl(self.fd, @bitCast(request), arg);
         try checkErr(rc, "tmp.ioctl", .{});
@@ -236,6 +179,48 @@ pub const Tmp = struct {
         return error.NOTSOCK;
     }
 };
+
+/// Build a DirEntryMap for a tmp overlay directory.
+/// When an existing fd is provided, it is reused (with lseek reset). Otherwise a fresh fd is opened via the overlay.
+pub fn mergeDirEntries(allocator: Allocator, overlay: *OverlayRoot, path: []const u8, existing_fd: ?linux.fd_t) !dirent.DirEntryMap {
+    var map = dirent.DirEntryMap{};
+    errdefer dirent.deinitMap(allocator, &map);
+
+    var opened_fd: linux.fd_t = undefined;
+    var needs_close = false;
+
+    if (existing_fd) |fd| {
+        _ = linux.lseek(fd, 0, linux.SEEK.SET);
+        opened_fd = fd;
+    } else {
+        var resolve_buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &resolve_buf) catch return map;
+        opened_fd = sysOpenat(resolved, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch return map;
+        needs_close = true;
+    }
+    defer if (needs_close) {
+        _ = linux.close(opened_fd);
+    };
+
+    var kernel_buf: [4096]u8 = undefined;
+    while (true) {
+        const rc = linux.getdents64(opened_fd, &kernel_buf, kernel_buf.len);
+        try checkErr(rc, "tmp.mergeDirEntries", .{});
+        if (rc == 0) break;
+        const prev_count = map.count();
+        try dirent.collectDirents(allocator, kernel_buf[0..rc], &map, false);
+        if (map.count() == prev_count and rc > 0) break;
+    }
+
+    return map;
+}
+
+/// Check if a tmp directory is empty from the guest perspective (filtering tombstones).
+pub fn isDirEmpty(allocator: Allocator, overlay: *OverlayRoot, path: []const u8, tombstones: *const Tombstones) !bool {
+    var map = try mergeDirEntries(allocator, overlay, path, null);
+    defer dirent.deinitMap(allocator, &map);
+    return dirent.isMapEmpty(&map, path, tombstones);
+}
 
 const testing = std.testing;
 
