@@ -6,7 +6,7 @@ const cmds = [
   "pwd",
   "ls",
   "curl -s https://www.google.com",
-  "python3 --version",
+  "python --version",
 ];
 
 for (const cmd of cmds) {
