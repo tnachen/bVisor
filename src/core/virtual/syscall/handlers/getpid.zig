@@ -29,7 +29,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
     // Get leader of caller's ThreadGroup
     const leader = caller.thread_group.getLeader() catch |err| {
-        std.log.err("getpid: Thread not found with tid={d}: {}", .{ caller.get_tgid(), err });
+        std.log.err("getpid: Thread not found with tid={d}: {}", .{ caller.getTgid(), err });
         return LinuxErr.SRCH;
     };
 

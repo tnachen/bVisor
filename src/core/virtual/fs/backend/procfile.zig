@@ -85,13 +85,8 @@ pub const ProcFile = struct {
     }
 
     fn formatStatus(buf: *[256]u8, target: *Thread) !usize {
-        const leader = try target.thread_group.getLeader();
-        const nstgid = target.namespace.getNsTid(leader) orelse 0;
-
-        const nsptgid: NsTgid = if (target.thread_group.parent) |parent_process| blk: {
-            const parent = try parent_process.getLeader();
-            break :blk target.namespace.getNsTid(parent) orelse 0;
-        } else 0;
+        const nstgid = try target.getNsTgid(target.namespace) orelse 0;
+        const nsptgid = try target.getNsPTgid(target.namespace) orelse 0;
 
         // TODO: support more status content lookup, this isn't 100% compatible
         // We also use the same name for everything
@@ -124,7 +119,7 @@ pub const ProcFile = struct {
             names_buf[name_count] = "self";
             name_count += 1;
 
-            var tgid_set = try caller.namespace.getThreadGroupIds(allocator);
+            var tgid_set = try caller.namespace.getNamespacedThreadGroupIds(allocator);
             defer tgid_set.deinit(allocator);
 
             var pid_idx: usize = 0;

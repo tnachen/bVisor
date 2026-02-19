@@ -62,7 +62,7 @@ pub fn registerThread(self: *Self, allocator: Allocator, thread: *Thread) !void 
     var nstid_buf: [128]NsTid = undefined;
 
     // Read of tid and tgid from the Thread
-    const tgid = thread.get_tgid();
+    const tgid = thread.getTgid();
     const tid = thread.tid;
 
     // Read NSpid (NsTid) chains from kernel
@@ -131,14 +131,14 @@ pub fn getNsTid(self: *Self, thread: *Thread) ?NsTid {
 }
 
 /// Return the set of unique thread group IDs visible in this Namespace
-pub fn getThreadGroupIds(self: *Self, allocator: Allocator) !NsTgidSet {
+pub fn getNamespacedThreadGroupIds(self: *Self, allocator: Allocator) !NsTgidSet {
     var set = NsTgidSet{};
     errdefer set.deinit(allocator);
 
     var iter = self.threads.iterator();
     while (iter.next()) |entry| {
         const thread = entry.value_ptr.*;
-        const nstgid = thread.get_tgid();
+        const nstgid = try thread.getNsTgid(self) orelse continue;
         if (nstgid <= 0) continue;
         try set.put(allocator, nstgid, {});
     }

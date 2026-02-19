@@ -43,7 +43,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const target_leader = try supervisor.guest_threads.getNamespaced(caller, target_nstgid);
 
         // Yield the targetted TGID in absolute terms
-        target_abstgid = target_leader.get_tgid();
+        target_abstgid = target_leader.getTgid();
         std.debug.assert(target_abstgid == target_leader.tid);
     }
 

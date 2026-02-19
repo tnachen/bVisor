@@ -43,6 +43,7 @@ pub fn collectDirents(
 
         const gop = try map.getOrPut(allocator, name);
         if (!gop.found_existing) {
+            errdefer _ = map.orderedRemove(name);
             // Key was auto-inserted as a reference to `raw`, so dupe it
             gop.key_ptr.* = try allocator.dupe(u8, name);
             gop.value_ptr.* = d_type;
