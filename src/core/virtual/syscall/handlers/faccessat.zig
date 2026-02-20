@@ -84,6 +84,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             }
 
             switch (h.backend) {
+                .event => unreachable, // eventfd are not opened via path routing
                 .proc => {
                     // For /proc paths, check if the virtualized file would exist.
                     // We only check F_OK (existence) - proc files are always readable.

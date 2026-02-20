@@ -10,18 +10,20 @@ const Cow = @import("backend/cow.zig").Cow;
 const Tmp = @import("backend/tmp.zig").Tmp;
 const ProcFile = @import("backend/procfile.zig").ProcFile;
 const Passthrough = @import("backend/passthrough.zig").Passthrough;
+const Event = @import("backend/event.zig").Event;
 
 const types = @import("../../types.zig");
 const Stat = types.Stat;
 
 const AtomicUsize = std.atomic.Value(usize);
 
-pub const BackendType = enum { passthrough, cow, tmp, proc };
+pub const BackendType = enum { passthrough, cow, tmp, proc, event };
 pub const Backend = union(BackendType) {
     passthrough: Passthrough,
     cow: Cow,
     tmp: Tmp,
     proc: ProcFile,
+    event: Event,
 };
 
 const Self = @This();
@@ -71,28 +73,19 @@ pub fn setOpenedPath(self: *Self, path: ?[]const u8) !void {
 
 pub fn read(self: *Self, buf: []u8) !usize {
     switch (self.backend) {
-        .passthrough => |*f| return f.read(buf),
-        .cow => |*f| return f.read(buf),
-        .tmp => |*f| return f.read(buf),
-        .proc => |*f| return f.read(buf),
+        inline else => |*f| return f.read(buf),
     }
 }
 
 pub fn write(self: *Self, data: []const u8) !usize {
     switch (self.backend) {
-        .passthrough => |*f| return f.write(data),
-        .cow => |*f| return f.write(data),
-        .tmp => |*f| return f.write(data),
-        .proc => |*f| return f.write(data),
+        inline else => |*f| return f.write(data),
     }
 }
 
 fn close(self: *Self) void {
     switch (self.backend) {
-        .passthrough => |*f| f.close(),
-        .cow => |*f| f.close(),
-        .tmp => |*f| f.close(),
-        .proc => |*f| f.close(),
+        inline else => |*f| f.close(),
     }
 }
 
@@ -105,15 +98,13 @@ pub fn backingFd(self: *Self) ?linux.fd_t {
         },
         .tmp => |f| f.fd,
         .proc => null,
+        .event => |f| f.fd,
     };
 }
 
 pub fn statx(self: *Self) !linux.Statx {
     switch (self.backend) {
-        .passthrough => |*f| return f.statx(),
-        .cow => |*f| return f.statx(),
-        .tmp => |*f| return f.statx(),
-        .proc => |*f| return f.statx(),
+        inline else => |*f| return f.statx(),
     }
 }
 
@@ -123,6 +114,7 @@ pub fn statxByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []con
         .cow => Cow.statxByPath(overlay, path),
         .tmp => Tmp.statxByPath(overlay, path),
         .proc => ProcFile.statxByPath(caller.?, path),
+        .event => Event.statxByPath(path),
     };
 }
 
@@ -132,6 +124,7 @@ pub fn getdents64(self: *Self, allocator: Allocator, buf: []u8, caller: ?*Thread
         .tmp => |*f| return f.getdents64(allocator, buf, self.opened_path, &self.dirents_offset, overlay, tombstones),
         .cow => |*f| return f.getdents64(allocator, buf, self.opened_path, &self.dirents_offset, overlay, tombstones),
         .proc => |*f| return f.getdents64(allocator, buf, caller.?, self.opened_path orelse return error.BADF, &self.dirents_offset),
+        .event => |*f| return f.getdents64(buf),
     }
 }
 
@@ -188,10 +181,7 @@ pub fn statxToStat(sx: linux.Statx) Stat {
 }
 pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
     const result = switch (self.backend) {
-        .passthrough => |*f| f.lseek(offset, whence),
-        .cow => |*f| f.lseek(offset, whence),
-        .tmp => |*f| f.lseek(offset, whence),
-        .proc => |*f| f.lseek(offset, whence),
+        inline else => |*f| return f.lseek(offset, whence),
     };
     const pos = try result;
     if (pos == 0) self.dirents_offset = 0;
