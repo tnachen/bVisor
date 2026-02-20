@@ -33,6 +33,7 @@ const recvfrom_handler = @import("handlers/recvfrom.zig").handle;
 const shutdown_handler = @import("handlers/shutdown.zig").handle;
 const sendmsg_handler = @import("handlers/sendmsg.zig").handle;
 const recvmsg_handler = @import("handlers/recvmsg.zig").handle;
+const eventfd2_handler = @import("handlers/eventfd2.zig").handle;
 
 const Stat = @import("../../types.zig").Stat;
 
@@ -1066,4 +1067,53 @@ test "recvfrom writes back source address length" {
     // close both
     _ = try close_handler(makeCloseNotif(init_tid, sv[0]), &supervisor);
     _ = try close_handler(makeCloseNotif(init_tid, sv[1]), &supervisor);
+}
+
+fn makeEventfd2Notif(tid: AbsTid, count: u32, flags: u32) linux.SECCOMP.notif {
+    return makeNotif(.eventfd2, .{
+        .pid = tid,
+        .arg0 = count,
+        .arg1 = flags,
+    });
+}
+
+test "eventfd2 -> write -> read round-trip" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    // Create eventfd with count=0
+    const resp = try eventfd2_handler(
+        makeEventfd2Notif(init_tid, 0, 0),
+        &supervisor,
+    );
+    const vfd: i32 = @intCast(resp.val);
+    try testing.expect(vfd >= 3);
+
+    // Write a u64 value (42) to the eventfd
+    var write_val: u64 = 42;
+    const write_buf = std.mem.asBytes(&write_val);
+    const write_resp = try write_handler(
+        makeWriteNotif(init_tid, vfd, write_buf.ptr, @sizeOf(u64)),
+        &supervisor,
+    );
+    try testing.expectEqual(@as(i64, @sizeOf(u64)), write_resp.val);
+
+    // Read back from the eventfd
+    var read_val: u64 = 0;
+    const read_buf = std.mem.asBytes(&read_val);
+    const read_resp = try read_handler(
+        makeReadNotif(init_tid, vfd, read_buf.ptr, @sizeOf(u64)),
+        &supervisor,
+    );
+    try testing.expectEqual(@as(i64, @sizeOf(u64)), read_resp.val);
+    try testing.expectEqual(@as(u64, 42), read_val);
+
+    // Close
+    _ = try close_handler(makeCloseNotif(init_tid, vfd), &supervisor);
 }

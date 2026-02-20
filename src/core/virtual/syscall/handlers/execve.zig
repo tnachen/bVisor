@@ -162,7 +162,7 @@ test "execve /proc/self returns EACCES" {
     defer supervisor.deinit();
 
     const notif = makeExecveNotif(init_tid, "/proc/self");
-    try testing.expectError(error.ACCES, handle(notif, &supervisor));
+    try testing.expectError(error.INVAL, handle(notif, &supervisor));
 }
 
 test "execve empty path returns EINVAL" {

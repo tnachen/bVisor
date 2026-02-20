@@ -37,3 +37,78 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     logger.log("eventfd: created vfd={d}", .{vfd});
     return replySuccess(notif.id, vfd);
 }
+
+const testing = std.testing;
+const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
+const LogBuffer = @import("../../../LogBuffer.zig");
+const generateUid = @import("../../../setup.zig").generateUid;
+
+test "eventfd2 creates a virtual fd" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const notif = makeNotif(.eventfd2, .{
+        .pid = init_tid,
+        .arg0 = 0,
+        .arg1 = 0,
+    });
+
+    const resp = try handle(notif, &supervisor);
+    const vfd: i32 = @intCast(resp.val);
+    try testing.expect(vfd >= 3);
+
+    // Verify the FdTable contains the returned vfd with .event backend
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
+    const file_ref = caller.fd_table.get_ref(vfd);
+    defer if (file_ref) |f| f.unref();
+    try testing.expect(file_ref != null);
+    try testing.expectEqual(File.BackendType.event, std.meta.activeTag(file_ref.?.backend));
+}
+
+test "eventfd2 with O_CLOEXEC sets cloexec flag" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const notif = makeNotif(.eventfd2, .{
+        .pid = init_tid,
+        .arg0 = 0,
+        .arg1 = @as(u32, @bitCast(@as(linux.O, .{ .CLOEXEC = true }))),
+    });
+
+    const resp = try handle(notif, &supervisor);
+    const vfd: i32 = @intCast(resp.val);
+
+    const caller = supervisor.guest_threads.lookup.get(init_tid).?;
+    try testing.expect(caller.fd_table.getCloexec(vfd));
+}
+
+test "eventfd2 unknown caller returns ESRCH" {
+    const allocator = testing.allocator;
+    const init_tid: AbsTid = 100;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, init_tid, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const notif = makeNotif(.eventfd2, .{
+        .pid = 999,
+        .arg0 = 0,
+        .arg1 = 0,
+    });
+
+    try testing.expectError(error.SRCH, handle(notif, &supervisor));
+}
