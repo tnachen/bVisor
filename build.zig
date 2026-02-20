@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     const fail_loudly = b.option(bool, "fail-loudly", "crash immediately on unsupported syscall") orelse false;
+    const interactive = b.option(bool, "interactive", "run-node: boot into interactive REPL instead of canned test list") orelse false;
     options.addOption(bool, "fail_loudly", fail_loudly);
 
     // Callers can select an architecture to target
@@ -173,11 +174,27 @@ pub fn build(b: *std.Build) void {
         const docker_build = b.addSystemCommand(&.{
             "docker", "build", "-t", image_tag, "./src/sdks/node",
         });
-        const node_cmd = b.addSystemCommand(&.{
-            "docker", "run",                  "--rm",                       "--security-opt", "seccomp=unconfined",
-            "-v",     "./src/sdks/node:/app", "-w",                         "/app",           image_tag,
-            "sh",     "-c",                   "bun install && bun test.ts",
-        });
+        const shell_cmd = if (interactive)
+            "bun install && bun test.ts --interactive"
+        else
+            "bun install && bun test.ts";
+
+        var node_cmd_args: std.ArrayListUnmanaged([]const u8) = .empty;
+        node_cmd_args.appendSlice(b.allocator, &.{
+            "docker", "run", "--rm", "--security-opt", "seccomp=unconfined",
+        }) catch @panic("OOM");
+        if (interactive) {
+            node_cmd_args.appendSlice(b.allocator, &.{ "-i", "-t" }) catch @panic("OOM");
+        }
+        node_cmd_args.appendSlice(b.allocator, &.{
+            "-v", "./src/sdks/node:/app", "-w", "/app", image_tag,
+            "sh", "-c", shell_cmd,
+        }) catch @panic("OOM");
+
+        const node_cmd = b.addSystemCommand(node_cmd_args.items);
+        if (interactive) {
+            node_cmd.stdio = .inherit;
+        }
         node_cmd.step.dependOn(&docker_build.step);
         for (arch_node_installs[0..arch_node_count]) |step| node_cmd.step.dependOn(step);
         node_cli_step.dependOn(&node_cmd.step);

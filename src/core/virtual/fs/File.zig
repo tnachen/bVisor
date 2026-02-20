@@ -124,6 +124,7 @@ pub fn fchmodatByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []
         .cow => try Cow.fchmodat(overlay, path, mode),
         .tmp => try Tmp.fchmodat(overlay, path, mode),
         .proc => {},
+        .event => {},
     }
 }
 

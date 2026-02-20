@@ -150,6 +150,7 @@ fn applyRoute(
                 .cow => try Cow.utimensat(&supervisor.overlay, h.normalized, times_arg),
                 .tmp => try Tmp.utimensat(&supervisor.overlay, h.normalized, times_arg),
                 .proc => {}, // virtual proc files: timestamps are not meaningful
+                .event => {}, // eventfds have no filesystem timestamps
             }
             return replySuccess(notif.id, 0);
         },
