@@ -4,7 +4,9 @@ const LinuxErr = @import("../../../linux_error.zig").LinuxErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
@@ -29,6 +31,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
     // Duplicate to next available fd
     const newfd = try caller.fd_table.dup(file);
+    errdefer _ = caller.fd_table.remove(newfd);
+
+    if (file.backingFd()) |backing_fd| {
+        try addfd(supervisor.notify_fd, notif.id, backing_fd, newfd, false);
+    }
 
     logger.log("dup: duplicated fd {d} -> {d}", .{ oldfd, newfd });
     return replySuccess(notif.id, newfd);

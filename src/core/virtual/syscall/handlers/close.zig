@@ -43,7 +43,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     }
     defer file.unref(); // Backend close happens automatically when last ref drops
 
+    const is_kernel_backed = file.backingFd() != null;
     logger.log("close: closed fd={d}", .{fd});
+
+    if (is_kernel_backed) return replyContinue(notif.id);
     return replySuccess(notif.id, 0);
 }
 

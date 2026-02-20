@@ -5,7 +5,9 @@ const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const File = @import("../../fs/File.zig");
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
@@ -34,6 +36,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
     const caller = try supervisor.guest_threads.get(caller_tid);
     const vfd = try caller.fd_table.insert(file, .{ .cloexec = cloexec });
+    errdefer _ = caller.fd_table.remove(vfd);
+
+    try addfd(supervisor.notify_fd, notif.id, kernel_fd, vfd, cloexec);
 
     logger.log("socket: created vfd={d}", .{vfd});
     return replySuccess(notif.id, vfd);

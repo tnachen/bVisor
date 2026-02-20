@@ -13,7 +13,9 @@ const resolveAndRoute = path_router.resolveAndRoute;
 const Supervisor = @import("../../../Supervisor.zig");
 const LogBuffer = @import("../../../LogBuffer.zig");
 const generateUid = @import("../../../setup.zig").generateUid;
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 
 const memory_bridge = @import("../../../utils/memory_bridge.zig");
 
@@ -146,6 +148,12 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
 
             // Insert into fd table and return the virtual fd
             const vfd = try caller.fd_table.insert(file, .{ .cloexec = flags.CLOEXEC });
+            errdefer _ = caller.fd_table.remove(vfd);
+
+            if (file.backingFd()) |backing_fd| {
+                try addfd(supervisor.notify_fd, notif.id, backing_fd, vfd, flags.CLOEXEC);
+            }
+
             logger.log("openat: opened {s} as vfd={d}", .{ h.normalized, vfd });
             return replySuccess(notif.id, @intCast(vfd));
         },

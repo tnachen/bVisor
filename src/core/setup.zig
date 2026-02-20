@@ -53,7 +53,10 @@ fn guestProcess(cmd: [:0]const u8, expected_notify_fd: linux.fd_t) !void {
     // Execve into a bash command
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd.ptr };
     // TODO: expose environment variables
-    const envp = [_:null]?[*:0]const u8{};
+    const envp = [_:null]?[*:0]const u8{
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME=/",
+    };
 
     _ = linux.execve("/bin/sh", &argv, &envp);
     linux.exit_group(1); // only reached if execve fails

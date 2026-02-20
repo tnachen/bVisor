@@ -4,7 +4,9 @@ const LinuxErr = @import("../../../linux_error.zig").LinuxErr;
 const Thread = @import("../../proc/Thread.zig");
 const AbsTid = Thread.AbsTid;
 const Supervisor = @import("../../../Supervisor.zig");
-const replySuccess = @import("../../../seccomp/notif.zig").replySuccess;
+const notif_helpers = @import("../../../seccomp/notif.zig");
+const replySuccess = notif_helpers.replySuccess;
+const addfd = notif_helpers.addfd;
 
 pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const logger = supervisor.logger;
@@ -56,6 +58,11 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     // Duplicate: both fds now point to the same File (mimicking true POSIX dup semantics)
     // The cloexec flag is per-fd, not inherited from oldfd
     _ = try caller.fd_table.dup_at(file, newfd, .{ .cloexec = flags.CLOEXEC });
+    errdefer _ = caller.fd_table.remove(newfd);
+
+    if (file.backingFd()) |backing_fd| {
+        try addfd(supervisor.notify_fd, notif.id, backing_fd, newfd, flags.CLOEXEC);
+    }
 
     logger.log("dup3: duplicated fd {d} -> {d}", .{ oldfd, newfd });
     return replySuccess(notif.id, newfd);
