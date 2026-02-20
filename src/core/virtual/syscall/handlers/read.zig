@@ -24,15 +24,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const buf_addr: u64 = notif.data.arg1;
     const count: usize = @truncate(notif.data.arg2);
 
-    // Handle stdin - passthrough to kernel
-    if (fd == linux.STDIN_FILENO) {
-        logger.log("read: passthrough for stdin", .{});
-        return replyContinue(notif.id);
-    }
-
     // Critical section: File lookup
     // File refcounting allows us to keep a pointer to the file outside of the critical section
-    var file: *File = undefined;
+    var opt_file: ?*File = null;
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
@@ -41,11 +35,20 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
         std.debug.assert(caller.tid == caller_tid);
 
-        file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("read: EBADF for fd={d}", .{fd});
-            return LinuxErr.BADF;
-        };
+        opt_file = caller.fd_table.get_ref(fd);
     }
+
+    // If fd is not in the FdTable, fall back to special stdio handling for virgin fds
+    if (opt_file == null) {
+        if (fd == linux.STDIN_FILENO) {
+            logger.log("read: passthrough for stdin", .{});
+            return replyContinue(notif.id);
+        }
+        logger.log("read: EBADF for fd={d}", .{fd});
+        return LinuxErr.BADF;
+    }
+
+    const file = opt_file.?;
     defer file.unref();
 
     // Perform read into supervisor-local buf

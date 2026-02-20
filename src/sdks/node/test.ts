@@ -2,15 +2,19 @@ import { Sandbox } from "bvisor";
 
 const cmds = [
   "echo 'Hello, world!'",
-  // "sleep 1",
+  "sleep 1",
   "pwd",
+  // "curl -s https://www.google.com",
+  "python3 --version",
+  "touch hello.py",
   "ls",
-  "curl -s https://www.google.com",
-  "python --version",
+  "echo 'print(\"Hello, world!\")' > hello.py",
+  "chmod +x hello.py",
+  "python3 hello.py",
 ];
 
+const sb = new Sandbox();
 for (const cmd of cmds) {
-  const sb = new Sandbox();
   const output = sb.runCmd(cmd);
   console.log(cmd, "->", "(stdout):", await output.stdout());
   console.log(

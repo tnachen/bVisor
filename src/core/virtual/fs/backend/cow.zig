@@ -47,10 +47,15 @@ pub const Cow = union(enum) {
             const cow_fd = try sysOpenat(cow_path, flags, mode);
             return .{ .writecopy = cow_fd };
         } else if (has_write_flags) {
-            // First write to this file - copy original to cow, then open
             const cow_path = try overlay.resolveCow(path, &cow_path_buf);
             try overlay.createCowParentDirs(path);
-            try copyFile(path, cow_path);
+            if (OverlayRoot.pathExistsOnRealFs(path)) {
+                // File exists: copy original content into overlay before opening
+                try copyFile(path, cow_path);
+            } else if (!flags.CREAT) {
+                return error.NOENT;
+            }
+            // New file (O_CREAT): sysOpenat creates it directly in the overlay
             const cow_fd = try sysOpenat(cow_path, flags, mode);
             return .{ .writecopy = cow_fd };
         } else {
@@ -205,6 +210,46 @@ pub const Cow = union(enum) {
         const rc = linux.ioctl(fd, @bitCast(request), arg);
         try checkErr(rc, "cow.ioctl", .{});
         return rc;
+    }
+
+    pub fn utimensat(overlay: *OverlayRoot, path: []const u8, times: ?*const [2]linux.timespec) !void {
+        var cow_path_buf: [512]u8 = undefined;
+
+        const target: []const u8 = if (overlay.cowExists(path)) blk: {
+            break :blk try overlay.resolveCow(path, &cow_path_buf);
+        } else if (OverlayRoot.pathExistsOnRealFs(path)) blk: {
+            // No overlay copy yet — trigger COW so we don't mutate the real host file's timestamps
+            const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+            try overlay.createCowParentDirs(path);
+            try copyFile(path, cow_path);
+            break :blk cow_path;
+        } else {
+            return error.NOENT;
+        };
+
+        const nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const rc = linux.utimensat(linux.AT.FDCWD, nt[0..target.len :0], times, 0);
+        try checkErr(rc, "cow.utimensat", .{});
+    }
+
+    pub fn fchmodat(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        var cow_path_buf: [512]u8 = undefined;
+
+        const target: []const u8 = if (overlay.cowExists(path)) blk: {
+            break :blk try overlay.resolveCow(path, &cow_path_buf);
+        } else if (OverlayRoot.pathExistsOnRealFs(path)) blk: {
+            // No overlay copy yet — trigger COW so we don't mutate the real host file's mode bits
+            const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+            try overlay.createCowParentDirs(path);
+            try copyFile(path, cow_path);
+            break :blk cow_path;
+        } else {
+            return error.NOENT;
+        };
+
+        const nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const rc = linux.fchmodat(linux.AT.FDCWD, nt[0..target.len :0], mode);
+        try checkErr(rc, "cow.fchmodat", .{});
     }
 
     pub fn connect(self: *Cow, addr: [*]const u8, addrlen: linux.socklen_t) !void {
@@ -587,6 +632,33 @@ test "open non-existent file RDONLY returns ENOENT" {
 
     const result = Cow.open(&overlay, "/nonexistent/path/file.txt", .{ .ACCMODE = .RDONLY }, 0o644);
     try testing.expectError(error.NOENT, result);
+}
+
+test "O_CREAT on non-existent file creates new file in overlay" {
+    const io = testing.io;
+    const uid: [16]u8 = "cowtestcowtest20".*;
+    var overlay = try OverlayRoot.init(io, uid);
+    defer overlay.deinit();
+
+    const new_path = "/tmp/bvisor_nonexistent_cow20";
+
+    var file = try Cow.open(&overlay, new_path, .{ .ACCMODE = .WRONLY, .CREAT = true }, 0o644);
+    defer file.close();
+
+    try testing.expect(file == .writecopy);
+    _ = try file.write("hello");
+
+    // Original path untouched on real FS
+    try testing.expect(!OverlayRoot.pathExistsOnRealFs(new_path));
+    // File lives in the overlay
+    try testing.expect(overlay.cowExists(new_path));
+
+    // Reopen and read back the written content
+    var read_file = try Cow.open(&overlay, new_path, .{ .ACCMODE = .RDONLY }, 0o644);
+    defer read_file.close();
+    var buf: [16]u8 = undefined;
+    const n = try read_file.read(&buf);
+    try testing.expectEqualStrings("hello", buf[0..n]);
 }
 
 test "open non-existent file WRONLY without CREAT fails" {

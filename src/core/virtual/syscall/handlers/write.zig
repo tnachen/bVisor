@@ -23,24 +23,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const buf_addr: u64 = notif.data.arg1;
     const count: usize = @truncate(notif.data.arg2);
 
-    // Virtualize stdout/stderr: capture into log buffer
-    if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
-        const max_len = 4096;
-        var max_buf: [max_len]u8 = undefined;
-        const max_count = @min(count, max_len);
-        const buf: []u8 = max_buf[0..max_count];
-        try memory_bridge.readSlice(buf, @intCast(caller_tid), buf_addr);
-        if (fd == linux.STDOUT_FILENO) {
-            try supervisor.stdout.write(supervisor.io, buf);
-        } else {
-            try supervisor.stderr.write(supervisor.io, buf);
-        }
-        return replySuccess(notif.id, @intCast(max_count));
-    }
-
     // Critical section: File lookup
     // File refcounting allows us to keep a pointer to the file outside of the critical section
-    var file: *File = undefined;
+    var opt_file: ?*File = null;
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
@@ -49,11 +34,29 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
         std.debug.assert(caller.tid == caller_tid);
 
-        file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("write: EBADF for fd={d}", .{fd});
-            return LinuxErr.BADF;
-        };
+        opt_file = caller.fd_table.get_ref(fd);
     }
+
+    // If fd is not in the FdTable, fall back to special stdio handling for virgin fds
+    if (opt_file == null) {
+        if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
+            const max_len = 4096;
+            var max_buf: [max_len]u8 = undefined;
+            const max_count = @min(count, max_len);
+            const buf: []u8 = max_buf[0..max_count];
+            try memory_bridge.readSlice(buf, @intCast(caller_tid), buf_addr);
+            if (fd == linux.STDOUT_FILENO) {
+                try supervisor.stdout.write(supervisor.io, buf);
+            } else {
+                try supervisor.stderr.write(supervisor.io, buf);
+            }
+            return replySuccess(notif.id, @intCast(max_count));
+        }
+        logger.log("write: EBADF for fd={d}", .{fd});
+        return LinuxErr.BADF;
+    }
+
+    const file = opt_file.?;
     defer file.unref();
 
     // Copy caller Thread buf to local
