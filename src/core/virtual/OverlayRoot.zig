@@ -46,6 +46,10 @@ pub fn init(io: std.Io, uid: [16]u8) !Self {
 
 pub fn deinit(self: *Self) void {
     self.root_dir.close(self.io);
+}
+
+/// Delete the overlay tree from disk. Call when the sandbox session is fully done.
+pub fn cleanup(self: *Self) void {
     const parent_dir = std.Io.Dir.openDirAbsolute(self.io, "/tmp/.bvisor/sb", .{}) catch return;
     defer parent_dir.close(self.io);
     parent_dir.deleteTree(self.io, &self.uid) catch |err| {
@@ -251,17 +255,18 @@ test "cowExists after creating COW copy returns true" {
     try testing.expect(overlay.cowExists("/etc/passwd"));
 }
 
-test "deinit deletes root directory tree" {
+test "cleanup deletes root directory tree" {
     const io = testing.io;
     const uid: [16]u8 = "ovtestovtest0008".*;
     var overlay = try Self.init(io, uid);
 
-    // Capture root path before deinit
+    // Capture root path before cleanup
     var root_buf: [128]u8 = undefined;
     const root_len = overlay.rootPath().len;
     @memcpy(root_buf[0..root_len], overlay.rootPath());
     const saved_root = root_buf[0..root_len];
 
+    overlay.cleanup();
     overlay.deinit();
 
     // Root should no longer exist

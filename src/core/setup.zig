@@ -91,3 +91,10 @@ pub fn generateUid(io: Io) [16]u8 {
     io.random(&uid_bytes);
     return std.fmt.bytesToHex(uid_bytes, .lower);
 }
+
+/// Delete the sandbox overlay tree for the given uid. Call when the sandbox session is fully done.
+pub fn cleanupOverlay(io: Io, uid: [16]u8) void {
+    const parent_dir = std.Io.Dir.openDirAbsolute(io, "/tmp/.bvisor/sb", .{}) catch return;
+    defer parent_dir.close(io);
+    parent_dir.deleteTree(io, &uid) catch {};
+}
