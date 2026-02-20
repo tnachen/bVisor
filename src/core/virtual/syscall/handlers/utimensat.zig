@@ -122,6 +122,40 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     return applyRoute(notif, supervisor, route_result, times_arg);
 }
 
+fn applyRoute(
+    notif: linux.SECCOMP.notif,
+    supervisor: *Supervisor,
+    route_result: path_router.ResolvedRouteResult,
+    times_arg: ?*const [2]linux.timespec,
+) !linux.SECCOMP.notif_resp {
+    switch (route_result) {
+        .block => return LinuxErr.PERM,
+        .handle => |h| {
+            if (h.backend == .cow or h.backend == .tmp) {
+                supervisor.mutex.lockUncancelable(supervisor.io);
+                defer supervisor.mutex.unlock(supervisor.io);
+                if (supervisor.tombstones.isTombstoned(h.normalized) or
+                    supervisor.tombstones.isAncestorTombstoned(h.normalized))
+                {
+                    return LinuxErr.NOENT;
+                }
+            }
+
+            switch (h.backend) {
+                .passthrough => {
+                    const nt = OverlayRoot.nullTerminate(h.normalized) catch return LinuxErr.NAMETOOLONG;
+                    const rc = linux.utimensat(linux.AT.FDCWD, nt[0..h.normalized.len :0], times_arg, 0);
+                    try checkErr(rc, "utimensat", .{});
+                },
+                .cow => try Cow.utimensat(&supervisor.overlay, h.normalized, times_arg),
+                .tmp => try Tmp.utimensat(&supervisor.overlay, h.normalized, times_arg),
+                .proc => {}, // virtual proc files: timestamps are not meaningful
+            }
+            return replySuccess(notif.id, 0);
+        },
+    }
+}
+
 const testing = std.testing;
 const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
 const LogBuffer = @import("../../../LogBuffer.zig");
@@ -274,38 +308,4 @@ test "utimensat AT_EMPTY_PATH with proc fd is no-op" {
     });
     const resp = try handle(notif, &supervisor);
     try testing.expectEqual(@as(i64, 0), resp.val);
-}
-
-fn applyRoute(
-    notif: linux.SECCOMP.notif,
-    supervisor: *Supervisor,
-    route_result: path_router.ResolvedRouteResult,
-    times_arg: ?*const [2]linux.timespec,
-) !linux.SECCOMP.notif_resp {
-    switch (route_result) {
-        .block => return LinuxErr.PERM,
-        .handle => |h| {
-            if (h.backend == .cow or h.backend == .tmp) {
-                supervisor.mutex.lockUncancelable(supervisor.io);
-                defer supervisor.mutex.unlock(supervisor.io);
-                if (supervisor.tombstones.isTombstoned(h.normalized) or
-                    supervisor.tombstones.isAncestorTombstoned(h.normalized))
-                {
-                    return LinuxErr.NOENT;
-                }
-            }
-
-            switch (h.backend) {
-                .passthrough => {
-                    const nt = OverlayRoot.nullTerminate(h.normalized) catch return LinuxErr.NAMETOOLONG;
-                    const rc = linux.utimensat(linux.AT.FDCWD, nt[0..h.normalized.len :0], times_arg, 0);
-                    try checkErr(rc, "utimensat", .{});
-                },
-                .cow => try Cow.utimensat(&supervisor.overlay, h.normalized, times_arg),
-                .tmp => try Tmp.utimensat(&supervisor.overlay, h.normalized, times_arg),
-                .proc => {}, // virtual proc files: timestamps are not meaningful
-            }
-            return replySuccess(notif.id, 0);
-        },
-    }
 }
