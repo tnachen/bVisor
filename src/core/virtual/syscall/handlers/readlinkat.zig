@@ -133,11 +133,196 @@ fn doReadlink(
     );
     try checkErr(rc, "readlinkat", .{});
 
-    const n: usize = rc;
+    const n: usize = @intCast(rc);
 
     // Write the symlink target back into the guest's buffer
     try memory_bridge.writeSlice(result_buf[0..n], caller_tid, buf_ptr);
 
     logger.log("readlinkat: {s} -> {s} ({d} bytes)", .{ real_path, result_buf[0..n], n });
     return replySuccess(notif.id, @intCast(n));
+}
+
+const testing = std.testing;
+const makeNotif = @import("../../../seccomp/notif.zig").makeNotif;
+const LogBuffer = @import("../../../LogBuffer.zig");
+const generateUid = @import("../../../setup.zig").generateUid;
+
+fn makeReadlinkatNotif(pid: AbsTid, path: [*:0]const u8, buf: [*]u8, bufsiz: usize) linux.SECCOMP.notif {
+    return makeNotif(.readlinkat, .{
+        .pid = pid,
+        .arg0 = @bitCast(@as(i64, linux.AT.FDCWD)),
+        .arg1 = @intFromPtr(path),
+        .arg2 = @intFromPtr(buf),
+        .arg3 = bufsiz,
+    });
+}
+
+fn makeSymlinkatNotif(pid: AbsTid, target: [*:0]const u8, linkpath: [*:0]const u8) linux.SECCOMP.notif {
+    return makeNotif(.symlinkat, .{
+        .pid = pid,
+        .arg0 = @intFromPtr(target),
+        .arg1 = @bitCast(@as(i64, linux.AT.FDCWD)),
+        .arg2 = @intFromPtr(linkpath),
+    });
+}
+
+fn initSupervisor(allocator: std.mem.Allocator, stdout_buf: *LogBuffer, stderr_buf: *LogBuffer) !Supervisor {
+    return Supervisor.init(allocator, testing.io, generateUid(testing.io), -1, 100, stdout_buf, stderr_buf);
+}
+
+test "readlinkat blocked path returns EPERM" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.PERM, handle(makeReadlinkatNotif(100, "/sys/some_link", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat empty path returns ENOENT" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.NOENT, handle(makeReadlinkatNotif(100, "", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat unknown caller returns ESRCH" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.SRCH, handle(makeReadlinkatNotif(999, "relative_link", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat on non-existent path returns ENOENT" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.NOENT, handle(makeReadlinkatNotif(100, "/tmp/nonexistent_link", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat on tombstoned path returns ENOENT" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const symlinkat_handler = @import("symlinkat.zig");
+    _ = try symlinkat_handler.handle(makeSymlinkatNotif(100, "target.txt", "/tmp/test_readlink_tomb"), &supervisor);
+
+    try supervisor.tombstones.add("/tmp/test_readlink_tomb");
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.NOENT, handle(makeReadlinkatNotif(100, "/tmp/test_readlink_tomb", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat on ancestor-tombstoned path returns ENOENT" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    try supervisor.tombstones.add("/tmp/tombstoned_dir");
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.NOENT, handle(makeReadlinkatNotif(100, "/tmp/tombstoned_dir/link", &result_buf, result_buf.len), &supervisor));
+}
+
+test "readlinkat symlink in /tmp returns target" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const symlinkat_handler = @import("symlinkat.zig");
+    _ = try symlinkat_handler.handle(makeSymlinkatNotif(100, "target.txt", "/tmp/test_readlink_tmp"), &supervisor);
+
+    var result_buf: [256]u8 = undefined;
+    const resp = try handle(makeReadlinkatNotif(100, "/tmp/test_readlink_tmp", &result_buf, result_buf.len), &supervisor);
+
+    const n: usize = @intCast(resp.val);
+    try testing.expectEqualStrings("target.txt", result_buf[0..n]);
+}
+
+test "readlinkat symlink in COW path returns target" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const symlinkat_handler = @import("symlinkat.zig");
+    _ = try symlinkat_handler.handle(makeSymlinkatNotif(100, "/etc/hosts", "/home/test_readlink_cow"), &supervisor);
+
+    var result_buf: [256]u8 = undefined;
+    const resp = try handle(makeReadlinkatNotif(100, "/home/test_readlink_cow", &result_buf, result_buf.len), &supervisor);
+
+    const n: usize = @intCast(resp.val);
+    try testing.expectEqualStrings("/etc/hosts", result_buf[0..n]);
+}
+
+test "readlinkat respects bufsiz limit" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    const symlinkat_handler = @import("symlinkat.zig");
+    _ = try symlinkat_handler.handle(makeSymlinkatNotif(100, "long_target_name.txt", "/tmp/test_readlink_trunc"), &supervisor);
+
+    var result_buf: [256]u8 = undefined;
+    const small_bufsiz: usize = 5;
+    const resp = try handle(makeReadlinkatNotif(100, "/tmp/test_readlink_trunc", &result_buf, small_bufsiz), &supervisor);
+
+    const n: usize = @intCast(resp.val);
+    try testing.expectEqual(small_bufsiz, n);
+    try testing.expectEqualStrings("long_", result_buf[0..n]);
+}
+
+test "readlinkat proc path returns EINVAL" {
+    const allocator = testing.allocator;
+    var stdout_buf = LogBuffer.init(allocator);
+    var stderr_buf = LogBuffer.init(allocator);
+    defer stdout_buf.deinit();
+    defer stderr_buf.deinit();
+    var supervisor = try initSupervisor(allocator, &stdout_buf, &stderr_buf);
+    defer supervisor.deinit();
+
+    var result_buf: [256]u8 = undefined;
+    try testing.expectError(error.INVAL, handle(makeReadlinkatNotif(100, "/proc/self/exe", &result_buf, result_buf.len), &supervisor));
 }
