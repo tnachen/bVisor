@@ -5,16 +5,8 @@ const checkErr = @import("../linux_error.zig").checkErr;
 const Self = @This();
 
 fn sysOpenat(path: []const u8, flags: linux.O, mode: linux.mode_t) !linux.fd_t {
-    var path_buf: [513]u8 = undefined;
-    if (path.len > 512) return error.NAMETOOLONG;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const rc = linux.openat(
-        linux.AT.FDCWD,
-        path_buf[0..path.len :0],
-        flags,
-        mode,
-    );
+    const buf = nullTerminate(path) catch return error.NAMETOOLONG;
+    const rc = linux.openat(linux.AT.FDCWD, buf[0..path.len :0], flags, mode);
     try checkErr(rc, "OverlayRoot.sysOpenat", .{});
     return @intCast(rc);
 }
@@ -93,14 +85,79 @@ pub fn resolveTmp(self: *const Self, path: []const u8, buf: []u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}/tmp{s}", .{ self.rootPath(), suffix }) catch error.NAMETOOLONG;
 }
 
+/// Null-terminate a path into a stack buffer for kernel syscalls.
+pub fn nullTerminate(path: []const u8) ![513]u8 {
+    if (path.len > 512) return error.NAMETOOLONG;
+    var buf: [513]u8 = undefined;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return buf;
+}
+
+/// Check if a path exists on the real (kernel) filesystem.
+/// Uses AT_SYMLINK_NOFOLLOW so dangling symlinks are detected as existing.
+pub fn pathExistsOnRealFs(path: []const u8) bool {
+    const buf = nullTerminate(path) catch return false;
+    const rc = linux.faccessat(linux.AT.FDCWD, buf[0..path.len :0], linux.F_OK, linux.AT.SYMLINK_NOFOLLOW);
+    return linux.errno(rc) == .SUCCESS;
+}
+
+/// Check if a path is a directory on the real (kernel) filesystem.
+pub fn isRealDir(path: []const u8) bool {
+    const buf = nullTerminate(path) catch return false;
+    var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
+    const rc = linux.statx(
+        linux.AT.FDCWD,
+        buf[0..path.len :0],
+        0,
+        @bitCast(linux.STATX{ .TYPE = true }),
+        &statx_buf,
+    );
+    if (linux.errno(rc) != .SUCCESS) return false;
+    return (statx_buf.mode & linux.S.IFMT) == linux.S.IFDIR;
+}
+
+/// Check if a path at a given overlay location is a directory.
+pub fn isCowDir(self: *const Self, path: []const u8) bool {
+    var cow_buf: [512]u8 = undefined;
+    const cow_path = self.resolveCow(path, &cow_buf) catch return false;
+    return isRealDir(cow_path);
+}
+
+/// Check if a path at a given tmp overlay location is a directory.
+pub fn isTmpDir(self: *const Self, path: []const u8) bool {
+    var tmp_buf: [512]u8 = undefined;
+    const tmp_path = self.resolveTmp(path, &tmp_buf) catch return false;
+    return isRealDir(tmp_path);
+}
+
+/// Check if a path exists in the tmp overlay.
+pub fn tmpExists(self: *const Self, path: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const tmp_path = self.resolveTmp(path, &buf) catch return false;
+    return pathExistsOnRealFs(tmp_path);
+}
+
 /// Checks if a COW copy exists for the given path.
+/// Uses AT_SYMLINK_NOFOLLOW so dangling symlinks are detected as existing.
 pub fn cowExists(self: *const Self, path: []const u8) bool {
     var buf: [512]u8 = undefined;
     const cow_path = self.resolveCow(path, &buf) catch return false;
-    // Try to open the file - if it succeeds, it exists
-    const fd = sysOpenat(cow_path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-    _ = linux.close(fd);
-    return true;
+    return pathExistsOnRealFs(cow_path);
+}
+
+/// Check if a path exists from the guest's perspective (COW overlay or real FS).
+pub fn guestPathExists(self: *const Self, path: []const u8) bool {
+    return self.cowExists(path) or pathExistsOnRealFs(path);
+}
+
+/// Check if a path is a directory from the guest's perspective.
+/// Checks COW overlay first, then real FS.
+pub fn isGuestDir(self: *const Self, path: []const u8) bool {
+    if (self.cowExists(path)) {
+        return self.isCowDir(path);
+    }
+    return isRealDir(path);
 }
 
 const testing = std.testing;

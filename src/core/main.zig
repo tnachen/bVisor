@@ -55,6 +55,10 @@ test {
     _ = @import("virtual/syscall/handlers/sendmsg.zig");
     _ = @import("virtual/syscall/handlers/recvmsg.zig");
     _ = @import("virtual/syscall/handlers/getdents64.zig");
+    _ = @import("virtual/syscall/handlers/mkdirat.zig");
+    _ = @import("virtual/syscall/handlers/unlinkat.zig");
+    _ = @import("virtual/syscall/handlers/symlinkat.zig");
+    _ = @import("virtual/syscall/handlers/readlinkat.zig");
     _ = @import("virtual/syscall/handlers/execve.zig");
     _ = @import("virtual/syscall/e2e_test.zig");
     _ = @import("virtual/OverlayRoot.zig");

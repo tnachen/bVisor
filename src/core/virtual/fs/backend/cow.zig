@@ -134,9 +134,7 @@ pub const Cow = union(enum) {
     }
 
     /// Merged directory listing for COW directories.
-    /// Reads entries from the kernel, adds overlay-only entries, filters tombstones.
     /// When dir_path is null, falls back to simple kernel forwarding.
-    /// TODO: Could be more parsimonious with the mutex lock on this entire method.
     pub fn getdents64(
         self: *Cow,
         allocator: Allocator,
@@ -146,60 +144,17 @@ pub const Cow = union(enum) {
         overlay: *OverlayRoot,
         tombstones: *const Tombstones,
     ) !usize {
-        const fd = switch (self.*) {
-            inline else => |backing_fd| backing_fd,
-        };
-
         const path = dir_path orelse {
+            const fd = switch (self.*) {
+                inline else => |backing_fd| backing_fd,
+            };
             const rc = linux.getdents64(fd, buf.ptr, buf.len);
             try checkErr(rc, "cow.getdents64", .{});
             return rc;
         };
 
-        const logger = Logger.init(.supervisor);
-
-        var map = dirent.DirEntryMap{};
+        var map = try mergeDirEntries(allocator, path, overlay);
         defer dirent.deinitMap(allocator, &map);
-
-        // Open the real directory on the host filesystem for base entries.
-        const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
-            logger.log("cow.getdents64: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
-            return 0;
-        };
-        defer _ = linux.close(real_fd);
-
-        // Read all kernel directory entries from the real path
-        {
-            var kernel_buf: [4096]u8 = undefined;
-            while (true) {
-                const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
-                try checkErr(rc, "cow.getdents64 kernel read", .{});
-                if (rc == 0) break;
-                try dirent.collectDirents(
-                    allocator,
-                    kernel_buf[0..rc],
-                    &map,
-                    false,
-                );
-            }
-        }
-
-        // Read overlay directory entries, skipping any names already present
-        if (openOverlayDir(overlay, path)) |overlay_fd| {
-            defer _ = linux.close(overlay_fd);
-            var overlay_buf: [4096]u8 = undefined;
-            while (true) {
-                const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
-                try checkErr(rc, "cow.getdents64 overlay read", .{});
-                if (rc == 0) break;
-                try dirent.collectDirents(
-                    allocator,
-                    overlay_buf[0..rc],
-                    &map,
-                    true,
-                );
-            }
-        }
 
         return dirent.serializeEntries(
             &map,
@@ -208,6 +163,39 @@ pub const Cow = union(enum) {
             dirents_offset,
             tombstones,
         );
+    }
+
+    pub fn mkdir(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        try overlay.createCowParentDirs(path);
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return error.NAMETOOLONG;
+        const rc = linux.mkdirat(linux.AT.FDCWD, buf[0..cow_path.len :0], mode);
+        try checkErr(rc, "cow.mkdir", .{});
+    }
+
+    pub fn unlink(overlay: *OverlayRoot, path: []const u8) void {
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = overlay.resolveCow(path, &cow_path_buf) catch return;
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], 0);
+    }
+
+    pub fn rmdir(overlay: *OverlayRoot, path: []const u8) void {
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = overlay.resolveCow(path, &cow_path_buf) catch return;
+        const buf = OverlayRoot.nullTerminate(cow_path) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, buf[0..cow_path.len :0], linux.AT.REMOVEDIR);
+    }
+
+    pub fn symlink(overlay: *OverlayRoot, target: []const u8, linkpath: []const u8) !void {
+        try overlay.createCowParentDirs(linkpath);
+        var cow_path_buf: [512]u8 = undefined;
+        const cow_path = try overlay.resolveCow(linkpath, &cow_path_buf);
+        const target_nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const link_nt = OverlayRoot.nullTerminate(cow_path) catch return error.NAMETOOLONG;
+        const rc = linux.symlinkat(target_nt[0..target.len :0], linux.AT.FDCWD, link_nt[0..cow_path.len :0]);
+        try checkErr(rc, "cow.symlink", .{});
     }
 
     pub fn ioctl(self: *Cow, request: linux.IOCTL.Request, arg: usize) !usize {
@@ -239,6 +227,50 @@ pub const Cow = union(enum) {
         return error.NOTSOCK;
     }
 };
+
+/// Build a merged DirEntryMap for a COW directory, combining real FS and overlay entries.
+pub fn mergeDirEntries(allocator: Allocator, path: []const u8, overlay: *OverlayRoot) !dirent.DirEntryMap {
+    const logger = Logger.init(.supervisor);
+
+    var map = dirent.DirEntryMap{};
+    errdefer dirent.deinitMap(allocator, &map);
+
+    const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
+        logger.log("cow.mergeDirEntries: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
+        return map;
+    };
+    defer _ = linux.close(real_fd);
+
+    {
+        var kernel_buf: [4096]u8 = undefined;
+        while (true) {
+            const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
+            try checkErr(rc, "cow.mergeDirEntries kernel read", .{});
+            if (rc == 0) break;
+            try dirent.collectDirents(allocator, kernel_buf[0..rc], &map, false);
+        }
+    }
+
+    if (openOverlayDir(overlay, path)) |overlay_fd| {
+        defer _ = linux.close(overlay_fd);
+        var overlay_buf: [4096]u8 = undefined;
+        while (true) {
+            const rc = linux.getdents64(overlay_fd, &overlay_buf, overlay_buf.len);
+            try checkErr(rc, "cow.mergeDirEntries overlay read", .{});
+            if (rc == 0) break;
+            try dirent.collectDirents(allocator, overlay_buf[0..rc], &map, true);
+        }
+    }
+
+    return map;
+}
+
+/// Check if a COW directory is empty from the guest perspective (merged view, filtering tombstones).
+pub fn isDirEmpty(allocator: Allocator, path: []const u8, overlay: *OverlayRoot, tombstones: *const Tombstones) !bool {
+    var map = try mergeDirEntries(allocator, path, overlay);
+    defer dirent.deinitMap(allocator, &map);
+    return dirent.isMapEmpty(&map, path, tombstones);
+}
 
 /// Try to open the overlay cow directory for the given guest path.
 /// Returns null if the overlay directory doesn't exist.
