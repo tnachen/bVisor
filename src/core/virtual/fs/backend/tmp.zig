@@ -100,6 +100,7 @@ pub const Tmp = struct {
         buf: []u8,
         dir_path: ?[]const u8,
         dirents_offset: *usize,
+        overlay: *OverlayRoot,
         tombstones: *const Tombstones,
     ) !usize {
         const path = dir_path orelse {
@@ -108,29 +109,8 @@ pub const Tmp = struct {
             return rc;
         };
 
-        // Reset kernel FD's offset so we always read the full directory
-        _ = linux.lseek(self.fd, 0, linux.SEEK.SET);
-
-        var map = dirent.DirEntryMap{};
+        var map = try mergeDirEntries(allocator, overlay, path, self.fd);
         defer dirent.deinitMap(allocator, &map);
-
-        // Read all kernel directory entries
-        {
-            var kernel_buf: [4096]u8 = undefined;
-            while (true) {
-                const rc = linux.getdents64(self.fd, &kernel_buf, kernel_buf.len);
-                try checkErr(rc, "tmp.getdents64 kernel read", .{});
-                if (rc == 0) break;
-                const prev_count = map.count();
-                try dirent.collectDirents(
-                    allocator,
-                    kernel_buf[0..rc],
-                    &map,
-                    false,
-                );
-                if (map.count() == prev_count and rc > 0) break;
-            }
-        }
 
         return dirent.serializeEntries(
             &map,
@@ -139,6 +119,38 @@ pub const Tmp = struct {
             dirents_offset,
             tombstones,
         );
+    }
+
+    pub fn mkdir(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        var buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(path, &buf);
+        // Ensure parent dirs exist in overlay
+        const parent = std.fs.path.dirname(resolved) orelse return;
+        const relative_parent = if (parent.len > 0 and parent[0] == '/') parent[1..] else parent;
+        if (relative_parent.len > 0) {
+            const root_dir = std.Io.Dir.cwd();
+            root_dir.createDirPath(overlay.io, relative_parent) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return error.NOENT,
+            };
+        }
+        const nt = OverlayRoot.nullTerminate(resolved) catch return error.NAMETOOLONG;
+        const rc = linux.mkdirat(linux.AT.FDCWD, nt[0..resolved.len :0], mode);
+        try checkErr(rc, "tmp.mkdir", .{});
+    }
+
+    pub fn unlink(overlay: *OverlayRoot, path: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &buf) catch return;
+        const nt = OverlayRoot.nullTerminate(resolved) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], 0);
+    }
+
+    pub fn rmdir(overlay: *OverlayRoot, path: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &buf) catch return;
+        const nt = OverlayRoot.nullTerminate(resolved) catch return;
+        _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], linux.AT.REMOVEDIR);
     }
 
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {
@@ -167,6 +179,48 @@ pub const Tmp = struct {
         return error.NOTSOCK;
     }
 };
+
+/// Build a DirEntryMap for a tmp overlay directory.
+/// When an existing fd is provided, it is reused (with lseek reset). Otherwise a fresh fd is opened via the overlay.
+pub fn mergeDirEntries(allocator: Allocator, overlay: *OverlayRoot, path: []const u8, existing_fd: ?linux.fd_t) !dirent.DirEntryMap {
+    var map = dirent.DirEntryMap{};
+    errdefer dirent.deinitMap(allocator, &map);
+
+    var opened_fd: linux.fd_t = undefined;
+    var needs_close = false;
+
+    if (existing_fd) |fd| {
+        _ = linux.lseek(fd, 0, linux.SEEK.SET);
+        opened_fd = fd;
+    } else {
+        var resolve_buf: [512]u8 = undefined;
+        const resolved = overlay.resolveTmp(path, &resolve_buf) catch return map;
+        opened_fd = sysOpenat(resolved, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch return map;
+        needs_close = true;
+    }
+    defer if (needs_close) {
+        _ = linux.close(opened_fd);
+    };
+
+    var kernel_buf: [4096]u8 = undefined;
+    while (true) {
+        const rc = linux.getdents64(opened_fd, &kernel_buf, kernel_buf.len);
+        try checkErr(rc, "tmp.mergeDirEntries", .{});
+        if (rc == 0) break;
+        const prev_count = map.count();
+        try dirent.collectDirents(allocator, kernel_buf[0..rc], &map, false);
+        if (map.count() == prev_count and rc > 0) break;
+    }
+
+    return map;
+}
+
+/// Check if a tmp directory is empty from the guest perspective (filtering tombstones).
+pub fn isDirEmpty(allocator: Allocator, overlay: *OverlayRoot, path: []const u8, tombstones: *const Tombstones) !bool {
+    var map = try mergeDirEntries(allocator, overlay, path, null);
+    defer dirent.deinitMap(allocator, &map);
+    return dirent.isMapEmpty(&map, path, tombstones);
+}
 
 const testing = std.testing;
 

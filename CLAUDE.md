@@ -84,7 +84,15 @@ src/
           sysinfo.zig   # System stats (virtualizes uptime/procs)
           lseek.zig     # repositioning file offsets
           faccessat.zig # checking user permissions to directory
+          fcntl.zig     # file descriptor control
           pipe2.zig     # pipe creation
+          getdents64.zig # directory listing
+          mkdirat.zig   # directory creation
+          unlinkat.zig  # file/directory removal
+          execve.zig    # program execution
+          socket.zig, socketpair.zig, connect.zig, shutdown.zig  # Socket lifecycle
+          ioctl.zig     # device I/O control
+          sendto.zig, recvfrom.zig, sendmsg.zig, recvmsg.zig    # Socket I/O
 
   sdks/
     node/               # Node.js SDK (see src/sdks/node/CLAUDE.md)

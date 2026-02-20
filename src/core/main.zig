@@ -61,6 +61,8 @@ test {
     _ = @import("virtual/Tombstones.zig");
     _ = @import("virtual/Symlinks.zig");
     _ = @import("virtual/fs/backend/passthrough.zig");
+    _ = @import("virtual/syscall/handlers/mkdirat.zig");
+    _ = @import("virtual/syscall/handlers/unlinkat.zig");
 }
 
 const DEFAULT_CMD = "echo hello world";
