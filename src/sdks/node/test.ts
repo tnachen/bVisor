@@ -6,11 +6,15 @@ const cmds = [
   "pwd",
   "ls",
   "curl -s https://www.google.com",
-  "python --version",
+  "python3 --version",
+  "touch hello.py",
+  "echo 'print(\"Hello, world!\")' > hello.py",
+  "chmod +x hello.py",
+  "python3 hello.py",
 ];
 
+const sb = new Sandbox();
 for (const cmd of cmds) {
-  const sb = new Sandbox();
   const output = sb.runCmd(cmd);
   console.log(cmd, "->", "(stdout):", await output.stdout());
   console.log(
