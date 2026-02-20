@@ -27,15 +27,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
 
-    // Handle stdin - passthrough to kernel
-    if (fd == linux.STDIN_FILENO) {
-        logger.log("readv: passthrough for stdin", .{});
-        return replyContinue(notif.id);
-    }
-
     // Critical section: File lookup
     // File refcounting allows us to keep a pointer to the file outside of the critical section
-    var file: *File = undefined;
+    var opt_file: ?*File = null;
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
@@ -44,11 +38,20 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
         std.debug.assert(caller.tid == caller_tid);
 
-        file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("readv: EBADF for fd={d}", .{fd});
-            return LinuxErr.BADF;
-        };
+        opt_file = caller.fd_table.get_ref(fd);
     }
+
+    // If fd is not in the FdTable, fall back to special stdio handling for virgin fds
+    if (opt_file == null) {
+        if (fd == linux.STDIN_FILENO) {
+            logger.log("readv: passthrough for stdin", .{});
+            return replyContinue(notif.id);
+        }
+        logger.log("readv: EBADF for fd={d}", .{fd});
+        return LinuxErr.BADF;
+    }
+
+    const file = opt_file.?;
     defer file.unref();
 
     // Read iovec array from child memory

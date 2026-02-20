@@ -17,13 +17,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const caller_tid: AbsTid = @intCast(notif.pid);
     const fd: i32 = @bitCast(@as(u32, @truncate(notif.data.arg0)));
 
-    // Passthrough stdin/stdout/stderr
-    if (fd == linux.STDIN_FILENO or fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
-        logger.log("close: passthrough for fd={d}", .{fd});
-        return replyContinue(notif.id);
-    }
-
-    var file: *File = undefined;
+    var opt_file: ?*File = null;
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
@@ -32,15 +26,25 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
         std.debug.assert(caller.tid == caller_tid);
 
-        file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("close: EBADF for fd={d}", .{fd});
-            return LinuxErr.BADF;
-        };
-
-        // Remove the file from the fd table
-        // Our stack-local ref stays alive until unref'ed
-        _ = caller.fd_table.remove(fd);
+        opt_file = caller.fd_table.get_ref(fd);
+        if (opt_file != null) {
+            // Remove the file from the fd table
+            // Our stack-local ref stays alive until unref'ed
+            _ = caller.fd_table.remove(fd);
+        }
     }
+
+    // If fd is not in the FdTable, fall back to special stdio handling for virgin fds
+    if (opt_file == null) {
+        if (fd == linux.STDIN_FILENO or fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
+            logger.log("close: passthrough for fd={d}", .{fd});
+            return replyContinue(notif.id);
+        }
+        logger.log("close: EBADF for fd={d}", .{fd});
+        return LinuxErr.BADF;
+    }
+
+    const file = opt_file.?;
     defer file.unref(); // Backend close happens automatically when last ref drops
 
     const is_kernel_backed = file.backingFd() != null;

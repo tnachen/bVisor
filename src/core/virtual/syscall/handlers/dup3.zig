@@ -29,12 +29,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         return LinuxErr.INVAL;
     }
 
-    // TODO: instead of blocking, need to track stdio in the FdTable, which will require some changes in read/write/close syscall handlers, too
-    if (newfd >= 0 and newfd <= 2) {
-        logger.log("dup3: stdio redirection not yet supported", .{});
-        return LinuxErr.INVAL;
-    }
-
     supervisor.mutex.lockUncancelable(supervisor.io);
     defer supervisor.mutex.unlock(supervisor.io);
 
