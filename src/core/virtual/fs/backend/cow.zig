@@ -232,6 +232,26 @@ pub const Cow = union(enum) {
         try checkErr(rc, "cow.utimensat", .{});
     }
 
+    pub fn fchmodat(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        var cow_path_buf: [512]u8 = undefined;
+
+        const target: []const u8 = if (overlay.cowExists(path)) blk: {
+            break :blk try overlay.resolveCow(path, &cow_path_buf);
+        } else if (OverlayRoot.pathExistsOnRealFs(path)) blk: {
+            // No overlay copy yet — trigger COW so we don't mutate the real host file's mode bits
+            const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+            try overlay.createCowParentDirs(path);
+            try copyFile(path, cow_path);
+            break :blk cow_path;
+        } else {
+            return error.NOENT;
+        };
+
+        const nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const rc = linux.fchmodat(linux.AT.FDCWD, nt[0..target.len :0], mode);
+        try checkErr(rc, "cow.fchmodat", .{});
+    }
+
     pub fn connect(self: *Cow, addr: [*]const u8, addrlen: linux.socklen_t) !void {
         _ = .{ self, addr, addrlen };
         return error.NOTSOCK;

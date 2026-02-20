@@ -7,11 +7,11 @@ const cmds = [
   // "ls",
   // "curl -s https://www.google.com",
   // "python3 --version",
-  // "touch hello.py",
-  // "echo 'print(\"Hello, world!\")' > hello.py",
-  // "chmod +x hello.py",
+  "touch hello.py",
+  "echo 'print(\"Hello, world!\")' > hello.py",
+  "chmod +x hello.py",
   // "python3 hello.py",
-  "python3 -c 'a = 3; b = 2; print(a + b);'"
+  // "python3 -c 'a = 3; b = 2; print(a + b);'"
 ];
 
 const sb = new Sandbox();

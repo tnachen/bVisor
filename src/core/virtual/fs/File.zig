@@ -126,6 +126,15 @@ pub fn statxByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []con
     };
 }
 
+pub fn fchmodatByPath(backend_type: BackendType, overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+    switch (backend_type) {
+        .passthrough => {},
+        .cow => try Cow.fchmodat(overlay, path, mode),
+        .tmp => try Tmp.fchmodat(overlay, path, mode),
+        .proc => {},
+    }
+}
+
 pub fn getdents64(self: *Self, allocator: Allocator, buf: []u8, caller: ?*Thread, overlay: *OverlayRoot, tombstones: *const Tombstones) !usize {
     switch (self.backend) {
         .passthrough => |*f| return f.getdents64(buf),
