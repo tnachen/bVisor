@@ -104,12 +104,6 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
                 },
                 .proc => {
                     // TODO: implement for various proc paths
-                    //  /proc/self/exe
-                    //  /proc/self/cwd
-                    //  /proc/self/fd/<fd>
-                    //  /proc/<nstgid>/exe
-                    //  /proc/<nstgid>/cwd
-                    //  /proc/<nstgid>/fd/<fd>
                     return LinuxErr.INVAL;
                 },
             }
