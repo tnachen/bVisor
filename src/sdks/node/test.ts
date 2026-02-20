@@ -13,7 +13,7 @@ if (isInteractive) {
       process.stdout.write("bvisor> ");
       continue;
     }
-    if (cmd == "exit") break;
+    if (cmd === "exit") break;
     const output = sb.runCmd(cmd);
     const stdout = await output.stdout();
     const stderr = await output.stderr();
