@@ -95,9 +95,10 @@ pub fn nullTerminate(path: []const u8) ![513]u8 {
 }
 
 /// Check if a path exists on the real (kernel) filesystem.
+/// Uses AT_SYMLINK_NOFOLLOW so dangling symlinks are detected as existing.
 pub fn pathExistsOnRealFs(path: []const u8) bool {
     const buf = nullTerminate(path) catch return false;
-    const rc = linux.faccessat(linux.AT.FDCWD, buf[0..path.len :0], linux.F_OK, 0);
+    const rc = linux.faccessat(linux.AT.FDCWD, buf[0..path.len :0], linux.F_OK, linux.AT.SYMLINK_NOFOLLOW);
     return linux.errno(rc) == .SUCCESS;
 }
 
@@ -138,13 +139,11 @@ pub fn tmpExists(self: *const Self, path: []const u8) bool {
 }
 
 /// Checks if a COW copy exists for the given path.
+/// Uses AT_SYMLINK_NOFOLLOW so dangling symlinks are detected as existing.
 pub fn cowExists(self: *const Self, path: []const u8) bool {
     var buf: [512]u8 = undefined;
     const cow_path = self.resolveCow(path, &buf) catch return false;
-    // Try to open the file - if it succeeds, it exists
-    const fd = sysOpenat(cow_path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-    _ = linux.close(fd);
-    return true;
+    return pathExistsOnRealFs(cow_path);
 }
 
 /// Check if a path exists from the guest's perspective (COW overlay or real FS).
