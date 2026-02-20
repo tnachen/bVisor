@@ -212,6 +212,26 @@ pub const Cow = union(enum) {
         return rc;
     }
 
+    pub fn utimensat(overlay: *OverlayRoot, path: []const u8, times: ?*const [2]linux.timespec) !void {
+        var cow_path_buf: [512]u8 = undefined;
+
+        const target: []const u8 = if (overlay.cowExists(path)) blk: {
+            break :blk try overlay.resolveCow(path, &cow_path_buf);
+        } else if (OverlayRoot.pathExistsOnRealFs(path)) blk: {
+            // No overlay copy yet — trigger COW so we don't mutate the real host file's timestamps
+            const cow_path = try overlay.resolveCow(path, &cow_path_buf);
+            try overlay.createCowParentDirs(path);
+            try copyFile(path, cow_path);
+            break :blk cow_path;
+        } else {
+            return error.NOENT;
+        };
+
+        const nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const rc = linux.utimensat(linux.AT.FDCWD, nt[0..target.len :0], times, 0);
+        try checkErr(rc, "cow.utimensat", .{});
+    }
+
     pub fn connect(self: *Cow, addr: [*]const u8, addrlen: linux.socklen_t) !void {
         _ = .{ self, addr, addrlen };
         return error.NOTSOCK;

@@ -6,11 +6,14 @@ const cmds = [
   // "pwd",
   // "ls",
   // "curl -s https://www.google.com",
-  "python3 --version",
+  // "python3 --version",
   "touch hello.py",
+  "ls",
   "echo 'print(\"Hello, world!\")' > hello.py",
-  "chmod +x hello.py",
-  "python3 hello.py",
+  "ls",
+  "cat hello.py",
+  // "chmod +x hello.py",
+  // "python3 hello.py",
 ];
 
 const sb = new Sandbox();
