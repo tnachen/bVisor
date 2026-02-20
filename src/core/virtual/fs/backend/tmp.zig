@@ -153,6 +153,25 @@ pub const Tmp = struct {
         _ = linux.unlinkat(linux.AT.FDCWD, nt[0..resolved.len :0], linux.AT.REMOVEDIR);
     }
 
+    pub fn symlink(overlay: *OverlayRoot, target: []const u8, linkpath: []const u8) !void {
+        var link_buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(linkpath, &link_buf);
+        // Ensure parent dirs exist in overlay
+        const parent = std.fs.path.dirname(resolved) orelse return;
+        const relative_parent = if (parent.len > 0 and parent[0] == '/') parent[1..] else parent;
+        if (relative_parent.len > 0) {
+            const root_dir = std.Io.Dir.cwd();
+            root_dir.createDirPath(overlay.io, relative_parent) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return error.NOENT,
+            };
+        }
+        const target_nt = OverlayRoot.nullTerminate(target) catch return error.NAMETOOLONG;
+        const link_nt = OverlayRoot.nullTerminate(resolved) catch return error.NAMETOOLONG;
+        const rc = linux.symlinkat(target_nt[0..target.len :0], linux.AT.FDCWD, link_nt[0..resolved.len :0]);
+        try checkErr(rc, "tmp.symlink", .{});
+    }
+
     pub fn ioctl(self: *Tmp, request: linux.IOCTL.Request, arg: usize) !usize {
         const rc = linux.ioctl(self.fd, @bitCast(request), arg);
         try checkErr(rc, "tmp.ioctl", .{});
