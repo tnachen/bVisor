@@ -1,31 +1,26 @@
 import { Sandbox } from "bvisor";
 
-const isInteractive = process.argv.includes("--interactive");
+const isInteractive = Bun.argv.includes("--interactive");
 
 const sb = new Sandbox();
 
 if (isInteractive) {
-  const reader = require("readline").createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  const prompt = () => {
-    reader.question("bvisor> ", async (line: string) => {
-      const cmd = line.trim();
-      if (!cmd) {
-        reader.close();
-        return;
-      }
-      const output = sb.runCmd(cmd);
-      const stdout = await output.stdout();
-      const stderr = await output.stderr();
-      if (stdout) process.stdout.write(stdout);
-      if (stderr) process.stderr.write(`\x1b[31m${stderr}\x1b[0m`);
-      prompt();
-    });
-  };
-  prompt();
+  process.stdout.write("bvisor> ");
+  for await (const line of console) {
+    const cmd = line.trim();
+    if (!cmd) {
+      process.stdout.write("use 'exit' to exit\n");
+      process.stdout.write("bvisor> ");
+      continue;
+    }
+    if (cmd == "exit") break;
+    const output = sb.runCmd(cmd);
+    const stdout = await output.stdout();
+    const stderr = await output.stderr();
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(`\x1b[31m${stderr}\x1b[0m`);
+    process.stdout.write("bvisor> ");
+  }
 } else {
   const cmds = [
     "echo 'Hello, world!'",

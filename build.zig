@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     const fail_loudly = b.option(bool, "fail-loudly", "crash immediately on unsupported syscall") orelse false;
-    const interactive = b.option(bool, "interactive", "run-node: boot into interactive REPL instead of canned test list") orelse false;
+    const interactive = b.option(bool, "interactive", "run-node: boot into interactive REPL") orelse false;
     options.addOption(bool, "fail_loudly", fail_loudly);
 
     // Callers can select an architecture to target
@@ -187,8 +187,8 @@ pub fn build(b: *std.Build) void {
             node_cmd_args.appendSlice(b.allocator, &.{ "-i", "-t" }) catch @panic("OOM");
         }
         node_cmd_args.appendSlice(b.allocator, &.{
-            "-v", "./src/sdks/node:/app", "-w", "/app", image_tag,
-            "sh", "-c", shell_cmd,
+            "-v", "./src/sdks/node:/app", "-w",      "/app", image_tag,
+            "sh", "-c",                   shell_cmd,
         }) catch @panic("OOM");
 
         const node_cmd = b.addSystemCommand(node_cmd_args.items);
