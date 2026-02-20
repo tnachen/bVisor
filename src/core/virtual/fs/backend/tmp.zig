@@ -178,6 +178,22 @@ pub const Tmp = struct {
         return rc;
     }
 
+    pub fn utimensat(overlay: *OverlayRoot, path: []const u8, times: ?*const [2]linux.timespec) !void {
+        var resolve_buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(path, &resolve_buf);
+        const nt = OverlayRoot.nullTerminate(resolved) catch return error.NAMETOOLONG;
+        const rc = linux.utimensat(linux.AT.FDCWD, nt[0..resolved.len :0], times, 0);
+        try checkErr(rc, "tmp.utimensat", .{});
+    }
+
+    pub fn fchmodat(overlay: *OverlayRoot, path: []const u8, mode: linux.mode_t) !void {
+        var resolve_buf: [512]u8 = undefined;
+        const resolved = try overlay.resolveTmp(path, &resolve_buf);
+        const nt = OverlayRoot.nullTerminate(resolved) catch return error.NAMETOOLONG;
+        const rc = linux.fchmodat(linux.AT.FDCWD, nt[0..resolved.len :0], mode);
+        try checkErr(rc, "tmp.fchmodat", .{});
+    }
+
     pub fn connect(self: *Tmp, addr: [*]const u8, addrlen: linux.socklen_t) !void {
         _ = .{ self, addr, addrlen };
         return error.NOTSOCK;

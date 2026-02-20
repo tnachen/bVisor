@@ -19,6 +19,7 @@ pub fn init(allocator: std.mem.Allocator) !*Self {
 }
 
 pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    core.cleanupOverlay(napi.io, self.uid);
     allocator.destroy(self);
 }
 

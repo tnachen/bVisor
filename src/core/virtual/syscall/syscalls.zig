@@ -49,6 +49,8 @@ const unlinkat = @import("handlers/unlinkat.zig");
 const symlinkat = @import("handlers/symlinkat.zig");
 const readlinkat = @import("handlers/readlinkat.zig");
 const eventfd2 = @import("handlers/eventfd2.zig");
+const utimensat = @import("handlers/utimensat.zig");
+const fchmodat = @import("handlers/fchmodat.zig");
 
 pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOMP.notif_resp {
     const sys: linux.SYS = @enumFromInt(notif.data.nr);
@@ -89,6 +91,8 @@ pub inline fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux
         .symlinkat => symlinkat.handle(notif, supervisor),
         .readlinkat => readlinkat.handle(notif, supervisor),
         .eventfd2 => eventfd2.handle(notif, supervisor),
+        .utimensat => utimensat.handle(notif, supervisor),
+        .fchmodat => fchmodat.handle(notif, supervisor),
         // Implemented - process
         .getpid => getpid.handle(notif, supervisor),
         .getppid => getppid.handle(notif, supervisor),

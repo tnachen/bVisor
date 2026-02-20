@@ -22,38 +22,9 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const iovec_ptr: u64 = notif.data.arg1;
     const iovec_count: usize = @min(@as(usize, @truncate(notif.data.arg2)), MAX_IOV);
 
-    // Virtualize stdout/stderr: gather iovecs and capture into log buffer
-    if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
-        var stdio_iovecs: [MAX_IOV]iovec_const = undefined;
-        var stdio_buf: [4096]u8 = undefined;
-        var stdio_len: usize = 0;
-
-        for (0..iovec_count) |i| {
-            const iov_addr = iovec_ptr + i * @sizeOf(iovec_const);
-            stdio_iovecs[i] = try memory_bridge.read(iovec_const, caller_tid, iov_addr);
-        }
-
-        for (0..iovec_count) |i| {
-            const iov = stdio_iovecs[i];
-            const buf_ptr = @intFromPtr(iov.base);
-            const buf_len = @min(iov.len, stdio_buf.len - stdio_len);
-            if (buf_len > 0) {
-                try memory_bridge.readSlice(stdio_buf[stdio_len..][0..buf_len], caller_tid, buf_ptr);
-                stdio_len += buf_len;
-            }
-        }
-
-        if (fd == linux.STDOUT_FILENO) {
-            try supervisor.stdout.write(supervisor.io, stdio_buf[0..stdio_len]);
-        } else {
-            try supervisor.stderr.write(supervisor.io, stdio_buf[0..stdio_len]);
-        }
-        return replySuccess(notif.id, @intCast(stdio_len));
-    }
-
     // Critical section: File lookup
     // File refcounting allows us to keep a pointer to the file outside of the critical section
-    var file: *File = undefined;
+    var opt_file: ?*File = null;
     {
         supervisor.mutex.lockUncancelable(supervisor.io);
         defer supervisor.mutex.unlock(supervisor.io);
@@ -62,11 +33,43 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         const caller = try supervisor.guest_threads.get(caller_tid);
         std.debug.assert(caller.tid == caller_tid);
 
-        file = caller.fd_table.get_ref(fd) orelse {
-            logger.log("writev: EBADF for fd={d}", .{fd});
-            return LinuxErr.BADF;
-        };
+        opt_file = caller.fd_table.get_ref(fd);
     }
+
+    // If fd is not in the FdTable, fall back to special stdio handling for virgin fds
+    if (opt_file == null) {
+        if (fd == linux.STDOUT_FILENO or fd == linux.STDERR_FILENO) {
+            var stdio_iovecs: [MAX_IOV]iovec_const = undefined;
+            var stdio_buf: [4096]u8 = undefined;
+            var stdio_len: usize = 0;
+
+            for (0..iovec_count) |i| {
+                const iov_addr = iovec_ptr + i * @sizeOf(iovec_const);
+                stdio_iovecs[i] = try memory_bridge.read(iovec_const, caller_tid, iov_addr);
+            }
+
+            for (0..iovec_count) |i| {
+                const iov = stdio_iovecs[i];
+                const buf_ptr = @intFromPtr(iov.base);
+                const buf_len = @min(iov.len, stdio_buf.len - stdio_len);
+                if (buf_len > 0) {
+                    try memory_bridge.readSlice(stdio_buf[stdio_len..][0..buf_len], caller_tid, buf_ptr);
+                    stdio_len += buf_len;
+                }
+            }
+
+            if (fd == linux.STDOUT_FILENO) {
+                try supervisor.stdout.write(supervisor.io, stdio_buf[0..stdio_len]);
+            } else {
+                try supervisor.stderr.write(supervisor.io, stdio_buf[0..stdio_len]);
+            }
+            return replySuccess(notif.id, @intCast(stdio_len));
+        }
+        logger.log("writev: EBADF for fd={d}", .{fd});
+        return LinuxErr.BADF;
+    }
+
+    const file = opt_file.?;
     defer file.unref();
 
     // Read iovec array from child memory
