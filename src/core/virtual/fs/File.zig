@@ -181,7 +181,7 @@ pub fn statxToStat(sx: linux.Statx) Stat {
 }
 pub fn lseek(self: *Self, offset: i64, whence: u32) !i64 {
     const result = switch (self.backend) {
-        inline else => |*f| return f.lseek(offset, whence),
+        inline else => |*f| f.lseek(offset, whence),
     };
     const pos = try result;
     if (pos == 0) self.dirents_offset = 0;

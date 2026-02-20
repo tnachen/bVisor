@@ -18,7 +18,8 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     const caller_tid: AbsTid = @intCast(notif.pid);
 
     const count: u32 = @truncate(notif.data.arg0);
-    const flags: linux.O = @bitCast(@as(u32, @truncate(notif.data.arg1)));
+    const flags: u32 = @truncate(notif.data.arg1);
+    const cloexec = flags & linux.EFD.CLOEXEC != 0;
 
     const event_fd = try Event.open(count, flags);
 
@@ -29,10 +30,10 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
     defer supervisor.mutex.unlock(supervisor.io);
 
     const caller = try supervisor.guest_threads.get(caller_tid);
-    const vfd = try caller.fd_table.insert(file, .{ .cloexec = flags.CLOEXEC });
+    const vfd = try caller.fd_table.insert(file, .{ .cloexec = cloexec });
     errdefer _ = caller.fd_table.remove(vfd);
 
-    try addfd(supervisor.notify_fd, notif.id, event_fd.fd, vfd, flags.CLOEXEC);
+    try addfd(supervisor.notify_fd, notif.id, event_fd.fd, vfd, cloexec);
 
     logger.log("eventfd: created vfd={d}", .{vfd});
     return replySuccess(notif.id, vfd);
@@ -84,7 +85,7 @@ test "eventfd2 with O_CLOEXEC sets cloexec flag" {
     const notif = makeNotif(.eventfd2, .{
         .pid = init_tid,
         .arg0 = 0,
-        .arg1 = @as(u32, @bitCast(@as(linux.O, .{ .CLOEXEC = true }))),
+        .arg1 = linux.EFD.CLOEXEC,
     });
 
     const resp = try handle(notif, &supervisor);

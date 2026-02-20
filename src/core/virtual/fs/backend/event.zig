@@ -19,8 +19,8 @@ fn sysWrite(fd: linux.fd_t, data: []const u8) !usize {
 pub const Event = struct {
     fd: linux.fd_t,
 
-    pub fn open(count: u32, flags: linux.O) !Event {
-        const fd = linux.eventfd(count, @bitCast(flags));
+    pub fn open(count: u32, flags: u32) !Event {
+        const fd = linux.eventfd(count, flags);
         try checkErr(fd, "event.open", .{});
         return .{ .fd = @intCast(fd) };
     }
