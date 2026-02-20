@@ -115,6 +115,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
             // Open the file via the appropriate backend
             // Note all are lock-free (independent of internal supervisor state) except for proc
             const file: *File = switch (h.backend) {
+                .event => unreachable, // eventfd are not opened via path routing
                 .passthrough => try File.init(allocator, .{ .passthrough = try Passthrough.open(&supervisor.overlay, h.normalized, flags, mode) }),
                 .cow => try File.init(allocator, .{ .cow = try Cow.open(&supervisor.overlay, h.normalized, flags, mode) }),
                 .tmp => try File.init(allocator, .{ .tmp = try Tmp.open(&supervisor.overlay, h.normalized, flags, mode) }),

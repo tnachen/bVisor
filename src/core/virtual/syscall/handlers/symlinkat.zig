@@ -72,6 +72,7 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         },
         .handle => |h| {
             switch (h.backend) {
+                .event => unreachable, // eventfd are not opened via path routing
                 .passthrough, .proc => return LinuxErr.PERM,
                 .cow => {
                     try handleCowSymlink(target, h.normalized, supervisor);

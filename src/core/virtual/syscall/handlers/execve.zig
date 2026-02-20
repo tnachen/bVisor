@@ -53,9 +53,13 @@ pub fn handle(notif: linux.SECCOMP.notif, supervisor: *Supervisor) !linux.SECCOM
         },
         .handle => |h| {
             switch (h.backend) {
+                .event => {
+                    logger.log("execve: cannot exec event file: {s}", .{path});
+                    return LinuxErr.INVAL;
+                },
                 .proc => {
                     logger.log("execve: cannot exec proc file: {s}", .{path});
-                    return LinuxErr.ACCES;
+                    return LinuxErr.INVAL;
                 },
                 .passthrough => {
                     // Guest's presumed path maps directly to the actual kernel path
@@ -158,7 +162,7 @@ test "execve /proc/self returns EACCES" {
     defer supervisor.deinit();
 
     const notif = makeExecveNotif(init_tid, "/proc/self");
-    try testing.expectError(error.ACCES, handle(notif, &supervisor));
+    try testing.expectError(error.INVAL, handle(notif, &supervisor));
 }
 
 test "execve empty path returns EINVAL" {

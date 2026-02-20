@@ -62,7 +62,9 @@ test {
     _ = @import("virtual/syscall/handlers/utimensat.zig");
     _ = @import("virtual/syscall/handlers/fchmodat.zig");
     _ = @import("virtual/syscall/handlers/execve.zig");
+    _ = @import("virtual/syscall/handlers/eventfd2.zig");
     _ = @import("virtual/syscall/e2e_test.zig");
+    _ = @import("virtual/fs/backend/event.zig");
     _ = @import("virtual/OverlayRoot.zig");
     _ = @import("virtual/Tombstones.zig");
     _ = @import("virtual/Symlinks.zig");
