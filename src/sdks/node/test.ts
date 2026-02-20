@@ -1,11 +1,11 @@
 import { Sandbox } from "bvisor";
 
 const cmds = [
-  "echo 'Hello, world!'",
+  // "echo 'Hello, world!'",
   // "sleep 1",
-  "pwd",
-  "ls",
-  "curl -s https://www.google.com",
+  // "pwd",
+  // "ls",
+  // "curl -s https://www.google.com",
   "python3 --version",
   "touch hello.py",
   "echo 'print(\"Hello, world!\")' > hello.py",

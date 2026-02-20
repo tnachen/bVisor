@@ -1,0 +1,227 @@
+python3 --version -> (stderr): 
+[supervisor]   Supervisor process  -1ms
+[supervisor]   Handling syscall: execve
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: faccessat
+[supervisor]   NOENT: faccessat: kernel check failed for /etc/ld.so.preload
+[supervisor]   Error: NOENT
+[supervisor]   Handling syscall: openat
+[supervisor]   openat: opened /etc/ld.so.cache as vfd=3
+[supervisor]   Success: 3
+[supervisor]   Handling syscall: fstat
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: close
+[supervisor]   close: closed fd=3
+[supervisor]   Continue
+[supervisor]   Handling syscall: openat
+[supervisor]   openat: opened /lib/aarch64-linux-gnu/libc.so.6 as vfd=4
+[supervisor]   Success: 4
+[supervisor]   Handling syscall: read
+[supervisor]   read: read 832 bytes
+[supervisor]   Success: 832
+[supervisor]   Handling syscall: fstat
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: close
+[supervisor]   close: closed fd=4
+[supervisor]   Continue
+[supervisor]   Handling syscall: set_tid_address
+[supervisor]   Continue
+[supervisor]   Handling syscall: set_robust_list
+[supervisor]   Continue
+[supervisor]   Handling syscall: rseq
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: prlimit64
+[supervisor]   Error: NOSYS
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: getuid
+[supervisor]   Continue
+[supervisor]   Handling syscall: getgid
+[supervisor]   Continue
+[supervisor]   Handling syscall: getpid
+[supervisor]   Success: 31
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: geteuid
+[supervisor]   Continue
+[supervisor]   Handling syscall: getrandom
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: getppid
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: getcwd
+[supervisor]   Success: 2
+[supervisor]   Handling syscall: geteuid
+[supervisor]   Continue
+[supervisor]   Handling syscall: getegid
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigaction
+[supervisor]   Continue
+[supervisor]   Handling syscall: fstatat64
+[supervisor]   NOENT: cow.sysOpenat
+[supervisor]   Error: NOENT
+[supervisor]   Handling syscall: fstatat64
+[supervisor]   NOENT: cow.sysOpenat
+[supervisor]   Error: NOENT
+[supervisor]   Handling syscall: fstatat64
+[supervisor]   NOENT: cow.sysOpenat
+[supervisor]   Error: NOENT
+[supervisor]   Handling syscall: fstatat64
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: rt_sigprocmask
+[supervisor]   Continue
+[supervisor]   Handling syscall: clone
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigprocmask
+[supervisor]   Continue
+[supervisor]   Handling syscall: execve
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigprocmask
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: wait4
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: faccessat
+[supervisor]   NOENT: faccessat: kernel check failed for /etc/ld.so.preload
+[supervisor]   Error: NOENT
+[supervisor]   Handling syscall: openat
+[supervisor]   openat: opened /etc/ld.so.cache as vfd=5
+[supervisor]   Success: 5
+[supervisor]   Handling syscall: fstat
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: close
+[supervisor]   close: closed fd=5
+[supervisor]   Continue
+[supervisor]   Handling syscall: openat
+[supervisor]   openat: opened /lib/aarch64-linux-gnu/libc.so.6 as vfd=6
+[supervisor]   Success: 6
+[supervisor]   Handling syscall: read
+[supervisor]   read: read 832 bytes
+[supervisor]   Success: 832
+[supervisor]   Handling syscall: fstat
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: mmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: close
+[supervisor]   close: closed fd=6
+[supervisor]   Continue
+[supervisor]   Handling syscall: set_tid_address
+[supervisor]   Continue
+[supervisor]   Handling syscall: set_robust_list
+[supervisor]   Continue
+[supervisor]   Handling syscall: rseq
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: mprotect
+[supervisor]   Continue
+[supervisor]   Handling syscall: prlimit64
+[supervisor]   Error: NOSYS
+[supervisor]   Handling syscall: munmap
+[supervisor]   Continue
+[supervisor]   Handling syscall: getrandom
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: brk
+[supervisor]   Continue
+[supervisor]   Handling syscall: openat
+[supervisor]   openat: opened /hello.py as vfd=7
+[supervisor]   Success: 7
+[supervisor]   Handling syscall: dup3
+[supervisor]   dup3: stdio redirection not yet supported
+[supervisor]   Error: INVAL
+[supervisor]   Handling syscall: close
+[supervisor]   close: closed fd=7
+[supervisor]   Continue
+[supervisor]   Handling syscall: utimensat
+[supervisor]   Error: NOSYS
+[supervisor]   Handling syscall: fstatat64
+[supervisor]   Success: 0
+[supervisor]   Handling syscall: fcntl
+[supervisor]   fcntl: passthrough for fd=1 cmd=3
+[supervisor]   Continue
+[supervisor]   Handling syscall: write
+[supervisor]   Success: 7
+[supervisor]   Handling syscall: write
+[supervisor]   Success: 23
+[supervisor]   Handling syscall: write
+[supervisor]   Success: 18
+[supervisor]   Handling syscall: write
+[supervisor]   Success: 1
+[supervisor]   Handling syscall: close
+[supervisor]   close: passthrough for fd=1
+[supervisor]   Continue
+[supervisor]   Handling syscall: close
+[supervisor]   close: passthrough for fd=2
+[supervisor]   Continue
+[supervisor]   Handling syscall: exit_group
+[supervisor]   Continue
+[supervisor]   Handling syscall: rt_sigreturn
+[supervisor]   Continue
+[supervisor]   Handling syscall: wait4
+[supervisor]   Continue
+[supervisor]   Handling syscall: exit_group
+[supervisor]   Continue
+[supervisor]   Guest exited (POLLHUP), stopping notification handler
+[supervisor]   Supervisor process exiting
+touch hello.py -> (stdout): 
+touch hello.py -> (stderr): touch: cannot touch 'hello.py': Invalid argument

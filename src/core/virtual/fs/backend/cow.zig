@@ -47,10 +47,15 @@ pub const Cow = union(enum) {
             const cow_fd = try sysOpenat(cow_path, flags, mode);
             return .{ .writecopy = cow_fd };
         } else if (has_write_flags) {
-            // First write to this file - copy original to cow, then open
             const cow_path = try overlay.resolveCow(path, &cow_path_buf);
             try overlay.createCowParentDirs(path);
-            try copyFile(path, cow_path);
+            if (OverlayRoot.pathExistsOnRealFs(path)) {
+                // File exists: copy original content into overlay before opening
+                try copyFile(path, cow_path);
+            } else if (!flags.CREAT) {
+                return error.NOENT;
+            }
+            // New file (O_CREAT): sysOpenat creates it directly in the overlay
             const cow_fd = try sysOpenat(cow_path, flags, mode);
             return .{ .writecopy = cow_fd };
         } else {
@@ -587,6 +592,33 @@ test "open non-existent file RDONLY returns ENOENT" {
 
     const result = Cow.open(&overlay, "/nonexistent/path/file.txt", .{ .ACCMODE = .RDONLY }, 0o644);
     try testing.expectError(error.NOENT, result);
+}
+
+test "O_CREAT on non-existent file creates new file in overlay" {
+    const io = testing.io;
+    const uid: [16]u8 = "cowtestcowtest20".*;
+    var overlay = try OverlayRoot.init(io, uid);
+    defer overlay.deinit();
+
+    const new_path = "/tmp/bvisor_nonexistent_cow20";
+
+    var file = try Cow.open(&overlay, new_path, .{ .ACCMODE = .WRONLY, .CREAT = true }, 0o644);
+    defer file.close();
+
+    try testing.expect(file == .writecopy);
+    _ = try file.write("hello");
+
+    // Original path untouched on real FS
+    try testing.expect(!OverlayRoot.pathExistsOnRealFs(new_path));
+    // File lives in the overlay
+    try testing.expect(overlay.cowExists(new_path));
+
+    // Reopen and read back the written content
+    var read_file = try Cow.open(&overlay, new_path, .{ .ACCMODE = .RDONLY }, 0o644);
+    defer read_file.close();
+    var buf: [16]u8 = undefined;
+    const n = try read_file.read(&buf);
+    try testing.expectEqualStrings("hello", buf[0..n]);
 }
 
 test "open non-existent file WRONLY without CREAT fails" {
