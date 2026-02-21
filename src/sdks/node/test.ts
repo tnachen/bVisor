@@ -1,9 +1,12 @@
 import { Sandbox } from "bvisor";
 
 const isInteractive = Bun.argv.includes("--interactive");
+const logLevel = Bun.argv.includes("--log-level")
+  ? Bun.argv[Bun.argv.indexOf("--log-level") + 1]
+  : "OFF";
 
 const sb = new Sandbox();
-// sb.setLogLevel("DEBUG");
+sb.setLogLevel(logLevel);
 
 if (isInteractive) {
   process.stdout.write("bvisor> ");

@@ -6,8 +6,12 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     const fail_loudly = b.option(bool, "fail-loudly", "crash immediately on unsupported syscall") orelse false;
-    const interactive = b.option(bool, "interactive", "run-node: boot into interactive REPL") orelse false;
     options.addOption(bool, "fail_loudly", fail_loudly);
+
+    // for run-node only
+    const interactive = b.option(bool, "interactive", "run-node: boot into interactive REPL") orelse false;
+    const LogLevel = enum { off, debug };
+    const log_level = b.option(LogLevel, "log-level", "run-node: log level for the sandbox") orelse .debug;
 
     // Callers can select an architecture to target
     // It defaults to the host architecture
@@ -174,10 +178,12 @@ pub fn build(b: *std.Build) void {
         const docker_build = b.addSystemCommand(&.{
             "docker", "build", "-t", image_tag, "./src/sdks/node",
         });
-        const shell_cmd = if (interactive)
-            "bun install && bun test.ts --interactive"
-        else
-            "bun install && bun test.ts";
+        const interactive_arg = if (interactive) " --interactive" else "";
+        const log_level_arg = if (log_level == .debug) " --log-level DEBUG" else "";
+        const shell_cmd = b.fmt("bun install && bun test.ts{s}{s}", .{
+            interactive_arg,
+            log_level_arg,
+        });
 
         var node_cmd_args: std.ArrayListUnmanaged([]const u8) = .empty;
         node_cmd_args.appendSlice(b.allocator, &.{
