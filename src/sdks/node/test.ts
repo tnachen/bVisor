@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Sandbox } from "bvisor";
 
 const isInteractive = Bun.argv.includes("--interactive");
