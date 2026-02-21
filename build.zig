@@ -178,9 +178,11 @@ pub fn build(b: *std.Build) void {
         const docker_build = b.addSystemCommand(&.{
             "docker", "build", "-t", image_tag, "./src/sdks/node",
         });
+        const script = b.option([]const u8, "script", "Script for run-node to execute (default: test.ts)") orelse "test.ts";
         const interactive_arg = if (interactive) " --interactive" else "";
         const log_level_arg = if (log_level == .debug) " --log-level DEBUG" else "";
-        const shell_cmd = b.fmt("bun install && bun test.ts{s}{s}", .{
+        const shell_cmd = b.fmt("bun install && bun {s}{s}{s}", .{
+            script,
             interactive_arg,
             log_level_arg,
         });
