@@ -5,7 +5,6 @@ const checkErr = @import("../../../linux_error.zig").checkErr;
 const OverlayRoot = @import("../../OverlayRoot.zig");
 const Tombstones = @import("../../Tombstones.zig");
 const dirent = @import("../dirent.zig");
-const Logger = @import("../../../types.zig").Logger;
 
 const BackingFD = linux.fd_t;
 
@@ -275,18 +274,11 @@ pub const Cow = union(enum) {
 
 /// Build a merged DirEntryMap for a COW directory, combining real FS and overlay entries.
 pub fn mergeDirEntries(allocator: Allocator, path: []const u8, overlay: *OverlayRoot) !dirent.DirEntryMap {
-    const logger = Logger.init(.supervisor);
-
     var map = dirent.DirEntryMap{};
     errdefer dirent.deinitMap(allocator, &map);
 
-    const real_fd = sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch |err| {
-        logger.log("cow.mergeDirEntries: failed to open real dir {s}: {s}", .{ path, @errorName(err) });
-        return map;
-    };
-    defer _ = linux.close(real_fd);
-
-    {
+    if (sysOpenat(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, 0) catch null) |real_fd| {
+        defer _ = linux.close(real_fd);
         var kernel_buf: [4096]u8 = undefined;
         while (true) {
             const rc = linux.getdents64(real_fd, &kernel_buf, kernel_buf.len);
