@@ -9,9 +9,13 @@ if (platform() !== "linux") {
 /** FFI contract: typed interface for the native Zig module loaded via require(). */
 export interface NativeModule {
   createSandbox(): External<"Sandbox">;
+  sandboxSetLogLevel(
+    sandbox: External<"Sandbox">,
+    level: "OFF" | "DEBUG",
+  ): void;
   sandboxRunCmd(
     sandbox: External<"Sandbox">,
-    command: string
+    command: string,
   ): {
     stdout: External<"Stream">;
     stderr: External<"Stream">;

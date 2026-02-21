@@ -3,6 +3,7 @@ import { Sandbox } from "bvisor";
 const isInteractive = Bun.argv.includes("--interactive");
 
 const sb = new Sandbox();
+// sb.setLogLevel("DEBUG");
 
 if (isInteractive) {
   process.stdout.write("bvisor> ");

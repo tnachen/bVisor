@@ -8,6 +8,7 @@ const Stream = @import("Stream.zig");
 const Self = @This();
 
 uid: [16]u8,
+log_level: core.LogLevel = .off,
 
 // Lifecycle helpers expect init/deinit
 pub fn init(allocator: std.mem.Allocator) !*Self {
@@ -21,6 +22,28 @@ pub fn init(allocator: std.mem.Allocator) !*Self {
 pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
     core.cleanupOverlay(napi.io, self.uid);
     allocator.destroy(self);
+}
+
+/// Set the log level for the sandbox
+pub fn setLogLevel(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
+    const allocator = napi.global_allocator;
+
+    // Copy args into native zig types
+    const args = napi.getArgs(env, info, 2) catch return null;
+    const self = napi.getSelf(Self, env, args[0]) catch return null;
+    const level = napi.getStringOwned(allocator, env, args[1]) catch return null;
+    defer allocator.free(level);
+
+    if (std.mem.eql(u8, level, "OFF")) {
+        self.log_level = .off;
+    } else if (std.mem.eql(u8, level, "DEBUG")) {
+        self.log_level = .debug;
+    } else {
+        napi.throw(env, "Invalid log level");
+        return null;
+    }
+
+    return napi.getNull(env) catch return null;
 }
 
 // Public API must follow napi interface
@@ -46,6 +69,7 @@ pub fn runCmd(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_v
         allocator,
         io,
         self.uid,
+        self.log_level,
         cmd,
         &stdout_stream.?.buffer,
         &stderr_stream.?.buffer,

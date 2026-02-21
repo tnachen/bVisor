@@ -3,8 +3,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const Logger = @import("../types.zig").Logger;
 const checkErr = @import("../linux_error.zig").checkErr;
-
-const supervisor_logger = Logger.init(.supervisor);
+const getGlobalLogger = @import("../types.zig").getGlobalLogger;
 
 /// Convenience function for creating synthetic notifs for testing
 pub fn makeNotif(syscall_nr: linux.SYS, args: struct {
@@ -30,7 +29,9 @@ pub fn makeNotif(syscall_nr: linux.SYS, args: struct {
 }
 
 pub fn replyContinue(id: u64) linux.SECCOMP.notif_resp {
-    supervisor_logger.log("Continue", .{});
+    if (getGlobalLogger()) |logger| {
+        logger.log("Continue", .{});
+    }
     return .{
         .id = id,
         .flags = linux.SECCOMP.USER_NOTIF_FLAG_CONTINUE,
@@ -40,7 +41,9 @@ pub fn replyContinue(id: u64) linux.SECCOMP.notif_resp {
 }
 
 pub fn replySuccess(id: u64, val: i64) linux.SECCOMP.notif_resp {
-    supervisor_logger.log("Success: {d}", .{val});
+    if (getGlobalLogger()) |logger| {
+        logger.log("Success: {d}", .{val});
+    }
     return .{
         .id = id,
         .flags = 0,
@@ -50,7 +53,9 @@ pub fn replySuccess(id: u64, val: i64) linux.SECCOMP.notif_resp {
 }
 
 pub fn replyErr(id: u64, err: linux.E) linux.SECCOMP.notif_resp {
-    supervisor_logger.log("Error: {s}", .{@tagName(err)});
+    if (getGlobalLogger()) |logger| {
+        logger.log("Error: {s}", .{@tagName(err)});
+    }
     return .{
         .id = id,
         .flags = 0,

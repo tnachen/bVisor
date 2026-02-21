@@ -9,6 +9,7 @@ pub const Logger = struct {
     };
 
     name: Name,
+    log_level: LogLevel = .debug, // when wrapped in SDKs, default becomes .off
 
     pub fn init(name: Name) @This() {
         return .{ .name = name };
@@ -16,6 +17,7 @@ pub const Logger = struct {
 
     pub fn log(self: @This(), comptime format: []const u8, args: anytype) void {
         if (builtin.is_test) return;
+        if (self.log_level == .off) return;
 
         var buf: [1024]u8 = undefined;
         const fmtlog = std.fmt.bufPrint(&buf, format, args) catch unreachable;
@@ -32,8 +34,27 @@ pub const Logger = struct {
 
         std.debug.print("{s}[{s}]{s}{s}\x1b[0m\n", .{ color, @tagName(self.name), padding, fmtlog });
     }
+
+    pub fn setLogLevel(self: *@This(), log_level: LogLevel) void {
+        self.log_level = log_level;
+    }
 };
 
+pub const LogLevel = enum {
+    off,
+    debug,
+};
+
+// I'm not a huge fan of setting the logger globally, but call sites are everywhere
+// so sometimes it's nice to just reach for this rather than dependency inject
+// TODO: the opposite of this shit
+pub var global_logger: ?*Logger = null;
+pub fn setGlobalLogger(logger: *Logger) void {
+    global_logger = logger;
+}
+pub fn getGlobalLogger() ?*Logger {
+    return global_logger;
+}
 /// Linux kernel's `struct stat`, selected by target architecture at comptime.
 ///
 /// This is the ABI struct written by the
