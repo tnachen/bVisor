@@ -174,10 +174,11 @@ pub fn build(b: *std.Build) void {
         const docker_build = b.addSystemCommand(&.{
             "docker", "build", "-t", image_tag, "./src/sdks/node",
         });
+        const script = b.option([]const u8, "script", "Script for run-node to execute (default: test.ts)") orelse "test.ts";
         const shell_cmd = if (interactive)
-            "bun install && bun test.ts --interactive"
+            b.fmt("bun install && bun {s} --interactive", .{script})
         else
-            "bun install && bun test.ts";
+            b.fmt("bun install && bun {s}", .{script});
 
         var node_cmd_args: std.ArrayListUnmanaged([]const u8) = .empty;
         node_cmd_args.appendSlice(b.allocator, &.{
