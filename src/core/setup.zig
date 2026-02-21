@@ -2,7 +2,10 @@ const std = @import("std");
 const linux = std.os.linux;
 const types = @import("types.zig");
 const seccomp = @import("seccomp/filter.zig");
+const notif = @import("seccomp/notif.zig");
 const Logger = types.Logger;
+const setGlobalLogger = types.setGlobalLogger;
+const LogLevel = types.LogLevel;
 const Supervisor = @import("Supervisor.zig");
 const LogBuffer = @import("LogBuffer.zig");
 const Allocator = std.mem.Allocator;
@@ -11,7 +14,7 @@ const Io = std.Io;
 const pidfd = @import("utils/pidfd.zig");
 const lookupGuestFd = pidfd.lookupGuestFdWithRetry;
 
-pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, stdout: *LogBuffer, stderr: *LogBuffer) !void {
+pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, log_level: LogLevel, cmd: [:0]const u8, stdout: *LogBuffer, stderr: *LogBuffer) !void {
     const start_time = Io.Clock.awake.now(io);
 
     // Probe the next available FD: dup gives the lowest free FD, then close it.
@@ -33,6 +36,7 @@ pub fn execute(allocator: Allocator, io: Io, uid: [16]u8, cmd: [:0]const u8, std
             allocator,
             io,
             uid,
+            log_level,
             start_time,
             init_guest_tid,
             expected_notify_fd,
@@ -66,13 +70,17 @@ fn supervisorProcess(
     allocator: Allocator,
     io: Io,
     uid: [16]u8,
+    log_level: LogLevel,
     start_time: Io.Timestamp,
     init_guest_tid: linux.pid_t,
     expected_notify_fd: linux.fd_t,
     stdout: *LogBuffer,
     stderr: *LogBuffer,
 ) !void {
-    const logger = Logger.init(.supervisor);
+    var logger = Logger.init(.supervisor);
+    logger.setLogLevel(log_level);
+    setGlobalLogger(&logger);
+
     logger.log("Supervisor process starting", .{});
     defer logger.log("Supervisor process exiting", .{});
 

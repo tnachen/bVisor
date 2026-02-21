@@ -8,6 +8,7 @@ export fn napi_register_module_v1(env: napi.c.napi_env, exports: napi.c.napi_val
     const funcs = .{
         .{ "createSandbox", napi.ZigExternal(Sandbox).create },
         .{ "sandboxRunCmd", Sandbox.runCmd },
+        .{ "sandboxSetLogLevel", Sandbox.setLogLevel },
         .{ "streamNext", Stream.next },
     };
     inline for (funcs) |f| {

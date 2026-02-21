@@ -7,6 +7,7 @@ const replyErr = @import("seccomp/notif.zig").replyErr;
 const types = @import("types.zig");
 const syscalls = @import("virtual/syscall/syscalls.zig");
 const Logger = types.Logger;
+const getGlobalLogger = types.getGlobalLogger;
 const Threads = @import("virtual/proc/Threads.zig");
 const OverlayRoot = @import("virtual/OverlayRoot.zig");
 const Tombstones = @import("virtual/Tombstones.zig");
@@ -46,7 +47,6 @@ stdout: *LogBuffer,
 stderr: *LogBuffer,
 
 pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, init_guest_tid: linux.pid_t, stdout: *LogBuffer, stderr: *LogBuffer) !Self {
-    const logger = Logger.init(.supervisor);
     var guest_threads = Threads.init(allocator);
     errdefer guest_threads.deinit();
     _ = try guest_threads.handleInitialThread(init_guest_tid);
@@ -62,7 +62,7 @@ pub fn init(allocator: Allocator, io: Io, uid: [16]u8, notify_fd: linux.fd_t, in
         .init_guest_tid = init_guest_tid,
         .notify_fd = notify_fd,
         .start_time = Io.Clock.awake.now(io),
-        .logger = logger,
+        .logger = if (getGlobalLogger()) |gl| gl.* else Logger{ .name = .supervisor },
         .guest_threads = guest_threads,
         .overlay = overlay,
         .tombstones = Tombstones.init(allocator),

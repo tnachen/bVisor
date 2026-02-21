@@ -171,7 +171,12 @@ pub fn checkErr(return_code: usize, comptime format: []const u8, args: anytype) 
 
     // When error, print red error message
     if (!builtin.is_test) {
-        std.debug.print("\x1b[91m[supervisor]   {s}: {s}\x1b[0m\n", .{ rc_name, fmtlog });
+        if (@import("types.zig").getGlobalLogger()) |logger| {
+            // TODO: make this nicer
+            if (logger.log_level != .off) {
+                std.debug.print("\x1b[91m[supervisor]   {s}: {s}\x1b[0m\n", .{ rc_name, fmtlog });
+            }
+        }
     }
 
     // Map the return code to a LinuxErr

@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig"); // ERIK TODO: kitchen sink utils, think about what else we could do here
 const Logger = types.Logger;
+const LogLevel = types.LogLevel;
 const LogBuffer = @import("LogBuffer.zig");
 const setup = @import("setup.zig");
 const Io = std.Io;
@@ -77,7 +78,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    const logger = Logger.init(.prefork);
+    var logger = Logger.init(.prefork);
+    types.setGlobalLogger(&logger);
     logger.log("Running bash via execve: {s}", .{DEFAULT_CMD});
 
     var stdout = LogBuffer.init(allocator);
@@ -85,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.deinit();
     defer stderr.deinit();
 
-    try execute(allocator, io, setup.generateUid(io), DEFAULT_CMD, &stdout, &stderr);
+    try execute(allocator, io, setup.generateUid(io), .debug, DEFAULT_CMD, &stdout, &stderr);
     try stdout.flush(io, File.stdout());
     try stderr.flush(io, File.stderr());
 }

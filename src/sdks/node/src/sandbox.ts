@@ -31,11 +31,15 @@ export class Sandbox {
     this.ptr = native.createSandbox();
   }
 
+  setLogLevel(level: "OFF" | "DEBUG") {
+    native.sandboxSetLogLevel(this.ptr, level);
+  }
+
   runCmd(command: string) {
     const result = native.sandboxRunCmd(this.ptr, command);
     return createOutput(
       new Stream(result.stdout).toReadableStream(),
-      new Stream(result.stderr).toReadableStream()
+      new Stream(result.stderr).toReadableStream(),
     );
   }
 }
@@ -49,7 +53,7 @@ export interface Output {
 
 function createOutput(
   stdoutStream: ReadableStream<Uint8Array>,
-  stderrStream: ReadableStream<Uint8Array>
+  stderrStream: ReadableStream<Uint8Array>,
 ): Output {
   return {
     stdoutStream,
