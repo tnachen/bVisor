@@ -8,7 +8,7 @@ Unlike gVisor, bVisor is built to run directly in your application, spinning up 
 
 **Status**: bVisor is an early proof-of-concept and should not yet be used in production. If you detect any discrepancies between bVisor's behavior and the linux kernel, please file an issue.
 
-**Compatibility**: bVisor currently ships for Linux hosts only, with support for ARM and X86 architectures and glibc/muscl ABIs.
+**Compatibility**: bVisor currently ships for Linux hosts only, with support for ARM and X86 architectures and glibc/musl ABIs.
 
 ## Usage
 
