@@ -1,16 +1,19 @@
-### bVisor is a lightweight local Linux sandbox.
+### bVisor - Embedded Bash Sandbox for Agents
 
-bVisor is an SDK and runtime for securely running Linux workloads on your local machine.
+bVisor is an SDK and runtime for safely executing bash commands locally, without the need for remote sandboxes or local VMs/containers. 
 
-Inspired by [gVisor](https://github.com/google/gVisor), bVisor runs programs directly on the host machine, providing isolation by intercepting and virtualizing [Linux syscalls](https://en.wikipedia.org/wiki/System_call) from userspace, allowing for secure and isolated I/O without the overhead of a virtual machine or remote infra.
+Inspired by [gVisor](https://github.com/google/gVisor), bVisor runs programs directly on the host machine, providing isolation by intercepting and virtualizing [Linux syscalls](https://en.wikipedia.org/wiki/System_call) from userspace. 
 
-Unlike gVisor, bVisor is built to run directly in your application, spinning up and tearing down sandboxes in milliseconds. This makes it ideal for ephemeral tasks commonly performed by LLM agents, such as code execution or filesystem operations.
+Unlike gVisor, bVisor is built to run directly in your application, spinning up sandboxes in ~2 milliseconds. This makes it ideal for ephemeral tasks commonly performed by LLM agents, such as code execution or filesystem operations.
 
-**Status**: bVisor is an early proof-of-concept and should not yet be used in production. If you detect any discrepencies between bVisor's behavior and the linux kernel, please file an issue.
+**Status**: bVisor is an early proof-of-concept and should not yet be used in production. If you detect any discrepancies between bVisor's behavior and the linux kernel, please file an issue.
+
+**Compatibility**: bVisor currently ships for Linux hosts only, with support for ARM and X86 architectures and glibc/muscl ABIs.
 
 ## Usage
 
-The bVisor sandbox runtime and TS/JS SDK can be installed via npm.
+The bVisor runtime ships wrapped in a Typescript SDK, installed via npm.
+
 ```bash
 npm install bvisor
 ```
@@ -25,9 +28,9 @@ const output = sb.runCmd("echo 'Hello, world!'");
 console.log(await output.stdout());
 ```
 
-This executes `echo 'Hello, world!'` inside a sandbox. 
+This executes `echo 'Hello, world!'` inside a sandbox.
 
-Filesystem operations are safely virtualized (copy-on-write):
+Filesystem operations are safely virtualized:
 ```typescript
 sb.runCmd("echo 'Hello, world!' > /tmp/test.txt"); // only visible from this sandbox
 ```
@@ -38,6 +41,14 @@ sb.runCmd("chroot /tmp"); // error
 ```
 
 Python SDK and CLI are also planned.
+
+## Examples
+
+Here are a selection of full examples which currently work in bVisor:
+- [Hello World](src/sdks/node/examples/hello-world.ts) - Run your first command in the sandbox
+- [Running Python](src/sdks/node/examples/python-hello.ts) - Write and execute a Python script 
+- [Testing Sandbox Boundaries](src/sdks/node/examples/sandbox-boundaries.ts) - See how the sandbox handles host fingerprinting, blocked paths, and filesystem isolation
+- [Filesystem Operations](src/sdks/node/examples/nested-dirs.ts) - Demonstrate directory creation, file operations, running scripts
 
 ## Architecture
 
@@ -57,11 +68,12 @@ Syscalls are intercepted and handled in userspace by the bVisor virtual kernel.
 | | Syscalls |
 |-|----------|
 | File I/O | `openat`, `close`, `read`, `write`, `readv`, `writev`, `lseek`, `dup`, `dup3`, `fcntl`, `ioctl`, `pipe2` |
-| File metadata | `fstat`, `fstatat64`, `faccessat` |
-| Directory | `getcwd`, `chdir`, `fchdir`, `getdents64`, `mkdirat`, `unlinkat` |
+| File metadata | `fstat`, `fstatat64`, `faccessat`, `utimensat`, `fchmodat` |
+| Directory | `getcwd`, `chdir`, `fchdir`, `getdents64`, `mkdirat`, `unlinkat`, `symlinkat`, `readlinkat` |
 | Process | `getpid`, `getppid`, `gettid`, `kill`, `tkill`, `exit`, `exit_group`, `execve` |
 | Networking | `socket`, `socketpair`, `connect`, `shutdown`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg` |
 | System info | `uname`, `sysinfo` |
+| Events | `eventfd2` |
 
 Note that bVisor may still call into the underlying kernel to virtualize any given syscall.
 
@@ -79,7 +91,7 @@ Syscalls are forwarded to the kernel unmodified. These syscalls are process-loca
 | Random | `getrandom` |
 
 #### Blocked
-Syscalls are blocked and return `ENOSYS`. These could allow sandbox escape or privilege escalation.
+Syscalls are blocked and return `ENOSYS` or `EPERM`. These could allow sandbox escape or privilege escalation.
 
 | | Syscalls |
 |-|----------|
@@ -88,6 +100,7 @@ Syscalls are blocked and return `ENOSYS`. These could allow sandbox escape or pr
 | Kernel modules | `kexec_load`, `kexec_file_load`, `init_module`, `finit_module`, `delete_module` |
 | Resource control | `setrlimit`, `prlimit64` |
 | Execution domain | `personality` |
+| Server sockets | `bind`, `listen`, `accept`, `accept4` |
 
 #### Roadmap
 Not yet handled but likely necessary for Bash compatibility. Currently return `ENOSYS`.
@@ -103,8 +116,8 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 | | Syscalls |
 |-|----------|
 | File I/O | `pread64`, `pwrite64`, `preadv`, `pwritev`, `preadv2`, `pwritev2`, `sendfile`, `splice`, `tee`, `vmsplice`, `readahead`, `copy_file_range` |
-| File metadata | `statx`, `statfs`, `fstatfs`, `readlinkat`, `utimensat`, `truncate`, `ftruncate`, `fallocate`, `fadvise64`, `flock`, `fchmod`, `fchmodat`, `fchmodat2`, `fchown`, `fchownat`, `cachestat` |
-| Directory | `mknodat`, `symlinkat`, `linkat`, `renameat`, `renameat2` |
+| File metadata | `statx`, `statfs`, `fstatfs`, `truncate`, `ftruncate`, `fallocate`, `fadvise64`, `flock`, `fchmod`, `fchmodat2`, `fchown`, `fchownat`, `faccessat2`, `cachestat` |
+| Directory | `mknodat`, `linkat`, `renameat`, `renameat2` |
 | Process | `execveat`, `clone3`, `tgkill`, `prctl`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `kcmp`, `userfaultfd` |
 | System info | `syslog`, `umask`, `getcpu`, `acct`, `vhangup`, `sethostname`, `setdomainname` |
 | Identity (write) | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `getresuid`, `setresgid`, `getresgid`, `setfsuid`, `setfsgid`, `getgroups`, `setgroups`, `setpriority`, `getpriority` |
@@ -113,7 +126,7 @@ Not yet handled but likely necessary for Bash compatibility. Currently return `E
 | Signals | `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `signalfd4` |
 | Time | `clock_settime`, `clock_adjtime`, `settimeofday`, `adjtimex`, `getitimer`, `setitimer`, `times`, `timer_create`, `timer_gettime`, `timer_getoverrun`, `timer_settime`, `timer_delete`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime` |
 | Networking | `getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `sendmmsg`, `recvmmsg` |
-| Polling/events | `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `epoll_pwait2`, `pselect6`, `ppoll`, `eventfd2` |
+| Polling/events | `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `epoll_pwait2`, `pselect6`, `ppoll` |
 | File sync | `sync`, `fsync`, `fdatasync`, `sync_file_range`, `syncfs` |
 | File handles | `name_to_handle_at`, `open_by_handle_at`, `openat2`, `close_range` |
 | Async I/O | `io_setup`, `io_destroy`, `io_submit`, `io_cancel`, `io_getevents`, `io_pgetevents`, `io_uring_setup`, `io_uring_enter`, `io_uring_register` |
