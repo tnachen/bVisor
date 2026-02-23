@@ -1,0 +1,7 @@
+ShowHN: bVisor - An Embedded Bash Sandbox, 2ms Boot, Written in Zig
+
+bVisor is an SDK and runtime for safely executing bash commands directly on your host machine. We built it on the belief that "sandbox" doesn't need to mean shipping off to remote sandbox products, or spinning up local VMs / containers. Sometimes, you just want to run that bash command locally.
+
+bVisor boots a sandbox from user-space without special permissions, powered by seccomp user notifier. This allows us to intercept syscalls from guest processes and selectively virtualize them to block privilege escalation, isolate process visibility, and keep filesystem changes isolated per sandbox (copy-on-write). Sandboxes boot in 2ms, and can run arbitrary binaries at native speed (with minor overhead per syscall). This approach is heavily inspired by Google's gVisor. 
+
+As of today, bVisor supports most filesystem operations, basic file I/O, and can run complex binaries such as python interpreters. It is packaged as a Typescript SDK and installable via npm. There's much to still implement (such as outbound network access to support 'curl', shipping a python SDK, etc), but we wanted to share it here for feedback and anyone who'd be able to make use of the current featureset! 
